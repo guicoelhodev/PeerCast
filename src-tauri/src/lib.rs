@@ -11,8 +11,11 @@ fn signaling_status(state: tauri::State<'_, SignalingState>) -> SignalingStatus 
 }
 
 #[tauri::command]
-fn create_room(state: tauri::State<'_, SignalingState>) -> RoomInfo {
-    state.create_room()
+fn create_room(
+    state: tauri::State<'_, SignalingState>,
+    public_app_url: Option<String>,
+) -> Result<RoomInfo, String> {
+    state.create_room(public_app_url)
 }
 
 #[tauri::command]
@@ -23,14 +26,6 @@ fn stop_room(state: tauri::State<'_, SignalingState>, room_id: String) -> bool {
 #[tauri::command]
 fn room_participants(state: tauri::State<'_, SignalingState>, room_id: String) -> Vec<String> {
     state.room_participants(&room_id)
-}
-
-#[tauri::command]
-fn set_public_app_url(
-    state: tauri::State<'_, SignalingState>,
-    public_app_url: String,
-) -> Result<(), String> {
-    state.set_public_app_url(public_app_url)
 }
 
 fn frontend_static_dir(app: &tauri::App) -> Option<PathBuf> {
@@ -56,11 +51,6 @@ fn frontend_static_dir(app: &tauri::App) -> Option<PathBuf> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let signaling_state = SignalingState::new(network::local_ip());
-    if let Ok(public_app_url) = std::env::var("PUBLIC_APP_URL") {
-        if let Err(error) = signaling_state.set_public_app_url(public_app_url) {
-            eprintln!("invalid PUBLIC_APP_URL: {error}");
-        }
-    }
     let server_state = signaling_state.clone();
 
     tauri::Builder::default()
@@ -91,8 +81,7 @@ pub fn run() {
             signaling_status,
             create_room,
             stop_room,
-            room_participants,
-            set_public_app_url
+            room_participants
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

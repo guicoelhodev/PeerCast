@@ -33,19 +33,20 @@ pub struct SignalingStatus {
     pub port: u16,
     pub local_ip: Option<String>,
     pub url: Option<String>,
-    pub public_app_url: Option<String>,
+    pub active_room: Option<RoomInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomInfo {
     pub room_id: String,
+    pub app_url: String,
     pub signaling_url: String,
-    pub public_app_url: Option<String>,
 }
 
 #[derive(Debug)]
 struct Room {
+    info: RoomInfo,
     tx: broadcast::Sender<SignalMessage>,
     participants: HashMap<Uuid, String>,
     peer_connections: HashMap<String, Uuid>,
@@ -63,7 +64,6 @@ struct InnerState {
     port: u16,
     local_ip: Option<IpAddr>,
     is_running: bool,
-    public_app_url: Option<String>,
     static_dir: Option<PathBuf>,
 }
 
@@ -80,35 +80,36 @@ impl SignalingState {
                 port: DEFAULT_SIGNALING_PORT,
                 local_ip,
                 is_running: false,
-                public_app_url: None,
                 static_dir: None,
             })),
         }
     }
 
-    pub fn create_room(&self) -> RoomInfo {
+    pub fn create_room(&self, public_app_url: Option<String>) -> Result<RoomInfo, String> {
         let room_id = Uuid::new_v4().simple().to_string();
         let (tx, _) = broadcast::channel(ROOM_CHANNEL_CAPACITY);
-        let (signaling_url, public_app_url) = self.room_urls(&room_id);
+        let (app_url, signaling_url) = self.room_urls(&room_id, public_app_url.as_deref())?;
 
-        self.inner
-            .lock()
-            .expect("signaling state mutex poisoned")
-            .rooms
-            .insert(
-                room_id.clone(),
-                Room {
-                    tx,
-                    participants: HashMap::new(),
-                    peer_connections: HashMap::new(),
-                },
-            );
-
-        RoomInfo {
-            room_id,
-            signaling_url,
-            public_app_url,
+        let mut inner = self.inner.lock().expect("signaling state mutex poisoned");
+        if !inner.rooms.is_empty() {
+            return Err("a room is already active; stop it before creating another".to_string());
         }
+        let room = RoomInfo {
+            room_id: room_id.clone(),
+            app_url,
+            signaling_url,
+        };
+        inner.rooms.insert(
+            room_id,
+            Room {
+                info: room.clone(),
+                tx,
+                participants: HashMap::new(),
+                peer_connections: HashMap::new(),
+            },
+        );
+
+        Ok(room)
     }
 
     pub fn remove_room(&self, room_id: &str) -> bool {
@@ -129,7 +130,7 @@ impl SignalingState {
             port: inner.port,
             local_ip: local_ip.clone(),
             url: local_ip.map(|ip| format!("ws://{ip}:{}", inner.port)),
-            public_app_url: inner.public_app_url.clone(),
+            active_room: inner.rooms.values().next().map(|room| room.info.clone()),
         }
     }
 
@@ -140,15 +141,6 @@ impl SignalingState {
             .is_running = true;
     }
 
-    pub fn set_public_app_url(&self, public_app_url: String) -> Result<(), String> {
-        let normalized = normalize_public_app_url(&public_app_url)?;
-        self.inner
-            .lock()
-            .expect("signaling state mutex poisoned")
-            .public_app_url = normalized;
-        Ok(())
-    }
-
     pub fn set_static_dir(&self, static_dir: Option<PathBuf>) {
         self.inner
             .lock()
@@ -156,20 +148,30 @@ impl SignalingState {
             .static_dir = static_dir;
     }
 
-    fn room_urls(&self, room_id: &str) -> (String, Option<String>) {
+    fn room_urls(
+        &self,
+        room_id: &str,
+        public_app_url: Option<&str>,
+    ) -> Result<(String, String), String> {
         let inner = self.inner.lock().expect("signaling state mutex poisoned");
-        if let Some(public_app_url) = inner.public_app_url.clone() {
-            return (
-                format!("{}/ws/{room_id}", websocket_origin(&public_app_url)),
-                Some(public_app_url),
-            );
+        if let Some(public_app_url) = public_app_url {
+            let app_url = normalize_public_app_url(public_app_url)?
+                .ok_or_else(|| "a public app URL is required for a shared room".to_string())?;
+            return Ok((
+                app_url.clone(),
+                format!("{}/ws/{room_id}", websocket_origin(&app_url)),
+            ));
         }
         let host = inner
             .local_ip
             .map(|ip| ip.to_string())
             .unwrap_or_else(|| "127.0.0.1".to_string());
 
-        (format!("ws://{host}:{}/ws/{room_id}", inner.port), None)
+        let app_url = format!("http://{host}:{}", inner.port);
+        Ok((
+            app_url.clone(),
+            format!("ws://{host}:{}/ws/{room_id}", inner.port),
+        ))
     }
 
     fn room_sender(&self, room_id: &str) -> Option<broadcast::Sender<SignalMessage>> {
@@ -336,8 +338,13 @@ pub async fn run_server(state: SignalingState) -> Result<(), String> {
         .map_err(|err| format!("signaling server stopped: {err}"))
 }
 
-async fn create_room_handler(State(state): State<SignalingState>) -> Json<RoomInfo> {
-    Json(state.create_room())
+async fn create_room_handler(
+    State(state): State<SignalingState>,
+) -> Result<Json<RoomInfo>, (StatusCode, String)> {
+    state
+        .create_room(None)
+        .map(Json)
+        .map_err(|error| (StatusCode::CONFLICT, error))
 }
 
 async fn static_handler(State(state): State<SignalingState>, uri: Uri) -> Response {
@@ -485,17 +492,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn public_https_origin_creates_a_secure_websocket_room_url() {
+    fn public_https_origin_creates_secure_room_urls() {
         let state = SignalingState::new(None);
-        state
-            .set_public_app_url("https://host.tailnet.ts.net".to_string())
+        let room = state
+            .create_room(Some("https://host.tailnet.ts.net".to_string()))
             .expect("valid public URL");
-
-        let room = state.create_room();
-        assert_eq!(
-            room.public_app_url.as_deref(),
-            Some("https://host.tailnet.ts.net")
-        );
+        assert_eq!(room.app_url, "https://host.tailnet.ts.net");
         assert!(room
             .signaling_url
             .starts_with("wss://host.tailnet.ts.net/ws/"));
@@ -505,7 +507,30 @@ mod tests {
     fn public_app_url_rejects_paths() {
         let state = SignalingState::new(None);
         assert!(state
-            .set_public_app_url("https://host.tailnet.ts.net/room".to_string())
+            .create_room(Some("https://host.tailnet.ts.net/room".to_string()))
             .is_err());
+    }
+
+    #[test]
+    fn local_room_uses_the_embedded_http_server() {
+        let state = SignalingState::new(Some("192.168.1.20".parse().unwrap()));
+        let room = state
+            .create_room(None)
+            .expect("local room creation succeeds");
+
+        assert_eq!(room.app_url, "http://192.168.1.20:17777");
+        assert!(room
+            .signaling_url
+            .starts_with("ws://192.168.1.20:17777/ws/"));
+    }
+
+    #[test]
+    fn only_one_room_can_be_active() {
+        let state = SignalingState::new(None);
+        state
+            .create_room(None)
+            .expect("first room creation succeeds");
+
+        assert!(state.create_room(None).is_err());
     }
 }

@@ -21,11 +21,12 @@ PeerCast also lets you change the transmission quality while sharing your screen
 
 Rooms are ephemeral. PeerCast does not require accounts, does not persist chat messages and does not use a central media server. Treat room links as private access tokens and only share them with people you trust.
 
-## Why Tailscale?
+## Sharing Modes
 
-PeerCast is designed to run locally, but browser participants need to reach the host computer. Tailscale provides a private VPN between your devices and gives the host a stable MagicDNS address. Its HTTPS proxy also gives browser clients a secure origin, which is important for camera, microphone and screen-sharing permissions.
+When creating a room in the desktop application, choose one of these modes:
 
-The included Docker Compose setup runs Tailscale with host networking and proxies the PeerCast server on port `17777`. The desktop app continues to run on the host, where it can access the camera, microphone and screen capture normally.
+- **Local network**: generates links using the host's local IP and port `17777`. All participants must be on the same network, and the host firewall must allow inbound connections on that port. Browser media permissions can be restricted on plain HTTP IP addresses.
+- **Tailscale**: generates secure HTTPS and WSS links using the MagicDNS URL provided by the host. Tailscale remains an external application; PeerCast does not manage its credentials or installation.
 
 ## Run Locally
 
@@ -34,7 +35,6 @@ The included Docker Compose setup runs Tailscale with host networking and proxie
 - Node.js and `pnpm`.
 - Rust and Cargo.
 - Tauri system dependencies for your operating system.
-- Docker, only if you want to share a room through Tailscale.
 
 ### Browser development mode
 
@@ -56,39 +56,47 @@ pnpm tauri:dev
 
 The desktop app starts the embedded signaling server on port `17777`. Create a room in the app, then open the generated browser URL or share the participant URL.
 
-### Tailscale sharing
+### Create a local room
 
-1. Create a Tailscale auth key in the Tailscale admin console.
-2. Copy the environment template:
-
-```bash
-cp .env.example .env
-```
-
-3. Set `TAILSCALE_AUTHKEY` in `.env`.
-4. Find your Tailscale DNS hostname before starting Docker. If Tailscale is already installed and connected on the host, run:
-
-```bash
-tailscale status --json | jq -r '.Self.DNSName'
-```
-
-If Tailscale is not installed on the host, get the MagicDNS domain from the Tailscale admin console or from another connected Tailscale device. The hostname configured by this project is `peercast`.
-
-5. Set `PUBLIC_APP_URL` in `.env` to the HTTPS URL for the `peercast` hostname. For example:
-
-```bash
-PUBLIC_APP_URL=https://peercast.example.ts.net
-```
-
-The URL must be an `http://` or `https://` origin without a path. HTTPS is recommended because browser clients need a secure context for camera, microphone and screen-sharing permissions.
-
-6. Start PeerCast with the shared Tailscale setup. This starts Docker Compose after `PUBLIC_APP_URL` has been configured:
+1. Run the desktop app:
 
 ```bash
 pnpm start
 ```
 
-The command starts the Tailscale container, configures the HTTPS proxy to the local PeerCast server and opens the Tauri app. Docker must run on Linux because the Compose service uses host networking.
+2. Choose **Local network** in the sidebar and create a room.
+3. Share the participant URL with devices on the same LAN.
+4. Allow inbound connections to port `17777` in the host firewall if prompted.
+
+### Tailscale sharing
+
+Install and authenticate Tailscale directly on the host machine. Docker and a Tailscale auth key are not required by PeerCast.
+
+1. Start Tailscale and authenticate the host if it is not already connected:
+
+```bash
+tailscale up
+```
+
+2. Expose PeerCast's local server through Tailscale HTTPS:
+
+```bash
+tailscale serve --bg --https=443 http://127.0.0.1:17777
+```
+
+3. Find the MagicDNS hostname:
+
+```bash
+tailscale status --json | jq -r '.Self.DNSName'
+```
+
+4. Run PeerCast with `pnpm start`, choose **Tailscale**, and enter the HTTPS MagicDNS URL without a path:
+
+```text
+https://host.tailnet.ts.net
+```
+
+5. Create the room and share the generated participant link.
 
 ## Useful Commands
 
@@ -102,7 +110,7 @@ pnpm tauri:build
 
 ## Security Notes
 
-PeerCast has no accounts or authentication. Anyone with a room link may be able to join that room. Use it on trusted networks or through a private Tailscale network, and never commit a real Tailscale auth key.
+PeerCast has no accounts or authentication. Anyone with a room link may be able to join that room. Use it on trusted networks or through a private Tailscale network.
 
 ## License
 

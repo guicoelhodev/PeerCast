@@ -9,19 +9,25 @@ The host starts the Tauri desktop app, which starts an embedded WebSocket signal
 ## Supported Connection Modes
 
 - Same LAN, using the host's local IP address.
-- VPN mesh networks such as Tailscale, Hamachi or ZeroTier.
+- Tailscale using a MagicDNS HTTPS proxy.
 - Direct access to the host IP and port.
 - Port forwarding, if the host chooses to expose the app to the public internet.
 
-## Connection URL
+## Connection URLs
 
-The intended signaling URL shape is:
+Local rooms use the embedded HTTP server and a signaling URL shaped like:
 
 ```text
-ws://HOST_IP:PORT/signaling?room=ROOM_ID&peer=PEER_ID
+http://HOST_IP:17777/?room=ROOM_ID
+ws://HOST_IP:17777/ws/ROOM_ID
 ```
 
-The UI should also show a human-friendly room URL or copyable connection details.
+Tailscale rooms use the host-provided MagicDNS HTTPS origin:
+
+```text
+https://HOST.tailnet.ts.net/?room=ROOM_ID
+wss://HOST.tailnet.ts.net/ws/ROOM_ID
+```
 
 ## LAN Usage
 
@@ -29,31 +35,15 @@ On the same local network, guests should connect to the host's private IP addres
 
 The host firewall must allow inbound connections to the selected signaling port.
 
+Browser camera, microphone, and screen-capture permissions may be unavailable on a plain HTTP IP address. Use the Tailscale HTTPS mode when a secure browser origin is required.
+
 ## VPN Mesh Usage
 
 With Tailscale, Hamachi, ZeroTier or similar tools, users should connect to the host's VPN-assigned IP address. This is the recommended remote usage mode for the MVP because it avoids most manual NAT and router setup.
 
 ### Tailscale HTTPS URL
 
-#### Tauri host with Docker Tailscale
-
-The recommended development command keeps Tauri on the host and uses Docker only for the Tailscale node. Copy `.env.example` to `.env`, set `TAILSCALE_AUTHKEY` and `PUBLIC_APP_URL`, then run:
-
-```bash
-pnpm start
-```
-
-The script starts the `tailscale` Compose service, waits for it to receive a tailnet IP, configures `tailscale serve --https=443` to proxy `127.0.0.1:17777`, and launches `pnpm tauri:dev`. The Tauri process inherits `PUBLIC_APP_URL`, so rooms automatically use secure `https://` and `wss://` links. This Compose mode uses Linux host networking. `pnpm dev` remains a local-only frontend workflow.
-
-To stop the tunnel after closing Tauri:
-
-```bash
-docker compose down
-```
-
-#### Manual host setup
-
-For shareable browser links, start Tailscale on the host and obtain its MagicDNS hostname:
+Tailscale is an external connectivity adapter. PeerCast does not start it, authenticate it, or store an auth key. For shareable browser links, start Tailscale on the host and obtain its MagicDNS hostname:
 
 ```bash
 sudo systemctl start tailscaled
@@ -61,7 +51,7 @@ tailscale up
 tailscale status --json | jq -r '.Self.DNSName'
 ```
 
-The final command prints a hostname such as `arch.tail6f452c.ts.net.`. Remove the trailing dot and enter it in the app's **Share URL (Tailscale)** field with HTTPS:
+The final command prints a hostname such as `arch.tail6f452c.ts.net.`. Remove the trailing dot and enter it in PeerCast's **MagicDNS HTTPS URL** field with HTTPS:
 
 ```text
 https://arch.tail6f452c.ts.net
@@ -74,7 +64,7 @@ tailscale serve --bg --https=443 http://127.0.0.1:17777
 tailscale serve status
 ```
 
-Start the desktop app with `pnpm tauri:dev` first. Run `pnpm build` once before the first shared development session so the embedded server has the static browser client to serve. The generated participant links then use the HTTPS hostname and a matching secure WebSocket (`wss://`) endpoint.
+Start the desktop app with `pnpm start`. The command builds the static browser client before launching Tauri, so the embedded server can serve it to participants. Create a room in **Tailscale** mode and enter the HTTPS hostname; generated participant links then use the HTTPS hostname and matching secure WebSocket (`wss://`) endpoint.
 
 ## Port Forwarding
 

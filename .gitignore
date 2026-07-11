@@ -5,10 +5,9 @@
 *.swp
 *.swo
 
-# Environment
+# Local environment overrides
 .env
 .env.*
-!.env.example
 
 # JavaScript/Svelte
 node_modules/

@@ -5,7 +5,9 @@ use desktop_lib::signaling::{self, SignalingState};
 async fn main() {
     let local_ip = network::local_ip();
     let state = SignalingState::new(local_ip);
-    let room = state.create_room();
+    let room = state
+        .create_room(None)
+        .expect("failed to create local room");
 
     println!("ROOM_URL={}", room.signaling_url);
 
