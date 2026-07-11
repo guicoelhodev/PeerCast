@@ -33,6 +33,31 @@ The host firewall must allow inbound connections to the selected signaling port.
 
 With Tailscale, Hamachi, ZeroTier or similar tools, users should connect to the host's VPN-assigned IP address. This is the recommended remote usage mode for the MVP because it avoids most manual NAT and router setup.
 
+### Tailscale HTTPS URL
+
+For shareable browser links, start Tailscale on the host and obtain its MagicDNS hostname:
+
+```bash
+sudo systemctl start tailscaled
+tailscale up
+tailscale status --json | jq -r '.Self.DNSName'
+```
+
+The final command prints a hostname such as `arch.tail6f452c.ts.net.`. Remove the trailing dot and enter it in the app's **Share URL (Tailscale)** field with HTTPS:
+
+```text
+https://arch.tail6f452c.ts.net
+```
+
+Expose the app's local port `17777` through the Tailscale HTTPS proxy before creating the room:
+
+```bash
+tailscale serve --bg --https=443 http://127.0.0.1:17777
+tailscale serve status
+```
+
+Start the desktop app with `pnpm tauri:dev` first. Run `pnpm build` once before the first shared development session so the embedded server has the static browser client to serve. The generated participant links then use the HTTPS hostname and a matching secure WebSocket (`wss://`) endpoint.
+
 ## Port Forwarding
 
 Public internet access can work if the host forwards the selected TCP port from the router to the host machine. This is optional for MVP and should be documented as advanced usage.

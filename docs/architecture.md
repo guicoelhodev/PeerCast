@@ -66,6 +66,12 @@ The room chat uses the existing WebSocket relay rather than WebRTC data channels
 
 Chat text is limited to 500 characters. The frontend validates incoming payloads and the relay rejects malformed, oversized, empty, or peer-ID-spoofed chat messages.
 
+## Tailscale Sharing and Reconnection
+
+The embedded Axum server also serves the built Svelte client when the desktop app is running. A host can configure a public HTTPS origin exposed through Tailscale; room URLs then use that origin and derive a matching `wss://` signaling endpoint. This avoids sharing localhost development URLs.
+
+Browser clients treat unexpected WebSocket closure as temporary. They reconnect with exponential backoff, send `ready` again, and recreate their WebRTC mesh connections while retaining active local camera and screen tracks. A deliberate Leave action cancels retries.
+
 ## Signaling Protocol
 
 Current protocol (implemented in `src/lib/signaling-protocol.ts`):

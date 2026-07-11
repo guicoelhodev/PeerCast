@@ -15,11 +15,13 @@
     port: number;
     localIp: string | null;
     url: string | null;
+    publicAppUrl: string | null;
   };
 
   type RoomInfo = {
     roomId: string;
     signalingUrl: string;
+    publicAppUrl: string | null;
   };
 
   type ScreenQualityPreset = {
@@ -74,6 +76,7 @@
   let isCreatingRoom = false;
   let joinUrl = "";
   let browserHostUrl = "";
+  let publicAppUrl = "";
   let peerRole: "host" | "guest" | null = null;
   let signalingConnectionState = "Disconnected";
   let peerConnectionState = "New";
@@ -106,6 +109,10 @@
 
   let copied = false;
   let participantPoll: ReturnType<typeof setInterval> | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectAttempts = 0;
+  let reconnectUrl = "";
+  let shouldReconnect = false;
 
   $: videoGridClass = getVideoGridClass(guestPeers.length + 1);
 
@@ -136,6 +143,7 @@
     if (isTauri) {
       try {
         signalingStatus = await invoke<SignalingStatus>("signaling_status");
+        publicAppUrl = signalingStatus.publicAppUrl ?? "";
       } catch (error) {
         infoMessage = `Signaling server error: ${String(error)}`;
       }
@@ -148,9 +156,10 @@
     infoMessage = "";
 
     try {
+      await invoke("set_public_app_url", { publicAppUrl });
       room = await invoke<RoomInfo>("create_room");
       joinUrl = room.signalingUrl;
-      browserHostUrl = buildBrowserRoomUrl(room.signalingUrl);
+      browserHostUrl = buildBrowserRoomUrl(room.signalingUrl, room.publicAppUrl);
       signalingStatus = await invoke<SignalingStatus>("signaling_status");
       startParticipantPolling();
       infoMessage = "Room created. Open the browser URL in Chrome/Firefox to start streaming.";
@@ -177,15 +186,15 @@
     }
   }
 
-  function buildBrowserRoomUrl(signalingUrl: string) {
-    const url = new URL("http://localhost:1420/");
+  function buildBrowserRoomUrl(signalingUrl: string, appUrl: string | null = null) {
+    const url = new URL(appUrl ?? "http://localhost:1420/");
     url.searchParams.set("role", "host");
     url.searchParams.set("room", signalingUrl);
     return url.toString();
   }
 
-  function buildGuestUrl(signalingUrl: string) {
-    const url = new URL("http://localhost:1420/");
+  function buildGuestUrl(signalingUrl: string, appUrl: string | null = null) {
+    const url = new URL(appUrl ?? "http://localhost:1420/");
     url.searchParams.set("room", signalingUrl);
     return url.toString();
   }
@@ -222,15 +231,21 @@
 
   async function startHost(signalingUrl: string) {
     closeConnection();
+    shouldReconnect = true;
+    reconnectUrl = signalingUrl;
     peerRole = "host";
     guestPeers = [];
 
-    await connectSignaling(signalingUrl);
-    // A refreshed host gets a new peer ID; existing guests use this to negotiate again.
-    sendSignal({ type: "ready", peerId: myPeerId });
-    infoMessage = webrtcAvailable
-      ? "Host ready. Waiting for guests to join."
-      : "Room created (signaling only). Open the room URL in Chrome/Firefox to stream.";
+    try {
+      await connectSignaling(signalingUrl);
+      // A refreshed host gets a new peer ID; existing guests use this to negotiate again.
+      sendSignal({ type: "ready", peerId: myPeerId });
+      infoMessage = webrtcAvailable
+        ? "Host ready. Waiting for guests to join."
+        : "Room created (signaling only). Open the room URL in Chrome/Firefox to stream.";
+    } catch {
+      infoMessage = "Unable to connect. Retrying automatically...";
+    }
   }
 
   async function joinRoom() {
@@ -254,18 +269,24 @@
 
     isConnecting = true;
     closeConnection();
+    shouldReconnect = true;
+    reconnectUrl = joinUrl.trim();
     errorMessage = "";
     infoMessage = "";
     peerRole = "guest";
 
-    await connectSignaling(joinUrl.trim());
+    try {
+      await connectSignaling(joinUrl.trim());
 
-    if (webrtcAvailable) {
-      sendSignal({ type: "ready", peerId: myPeerId });
-      infoMessage = "Joined the room. Connecting to participants.";
-    } else {
-      infoMessage =
-        "WebSocket connected but WebRTC not available. Open this URL in a browser.";
+      if (webrtcAvailable) {
+        sendSignal({ type: "ready", peerId: myPeerId });
+        infoMessage = "Joined the room. Connecting to participants.";
+      } else {
+        infoMessage =
+          "WebSocket connected but WebRTC not available. Open this URL in a browser.";
+      }
+    } catch {
+      infoMessage = "Unable to connect. Retrying automatically...";
     }
     isConnecting = false;
   }
@@ -377,24 +398,54 @@
 
   async function connectSignaling(signalingUrl: string) {
     await new Promise<void>((resolve, reject) => {
-      ws = new WebSocket(signalingUrl);
+      const socket = new WebSocket(signalingUrl);
+      ws = socket;
       signalingConnectionState = "Connecting";
 
-      ws.onopen = () => {
+      socket.onopen = () => {
         signalingConnectionState = "Connected";
         resolve();
       };
-      ws.onerror = () => {
+      socket.onerror = () => {
         signalingConnectionState = "Error";
         reject(new Error("WebSocket connection failed"));
       };
-      ws.onclose = () => {
+      socket.onclose = () => {
+        if (ws !== socket) return;
         signalingConnectionState = "Disconnected";
+        handleUnexpectedDisconnect();
       };
-      ws.onmessage = async (event) => {
+      socket.onmessage = async (event) => {
         await handleSignalMessage(String(event.data));
       };
     });
+  }
+
+  function handleUnexpectedDisconnect() {
+    if (!shouldReconnect || !peerRole || !reconnectUrl) return;
+    for (const guest of guestPeers) guest.pc.close();
+    guestPeers = [];
+    peerConnectionState = "Reconnecting";
+    scheduleReconnect();
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer || !shouldReconnect) return;
+    const delay = Math.min(1_000 * 2 ** reconnectAttempts, 10_000);
+    reconnectAttempts += 1;
+    signalingConnectionState = "Reconnecting";
+    infoMessage = `Connection lost. Retrying in ${Math.ceil(delay / 1000)}s...`;
+    reconnectTimer = setTimeout(async () => {
+      reconnectTimer = null;
+      try {
+        await connectSignaling(reconnectUrl);
+        reconnectAttempts = 0;
+        sendSignal({ type: "ready", peerId: myPeerId });
+        infoMessage = "Reconnected to the room.";
+      } catch {
+        scheduleReconnect();
+      }
+    }, delay);
   }
 
   async function handleSignalMessage(data: string) {
@@ -883,6 +934,13 @@
   }
 
   function closeConnection() {
+    shouldReconnect = false;
+    reconnectAttempts = 0;
+    reconnectUrl = "";
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     ws?.close();
     dataChannel?.close();
     screenStream?.getTracks().forEach((track) => track.stop());
@@ -939,6 +997,14 @@
         <!-- ========== TAURI SERVER VIEW ========== -->
         <div>
           <p class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500">Signaling Server</p>
+          <label class="mb-2 block text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500" for="public-app-url">Share URL (Tailscale)</label>
+          <input
+            id="public-app-url"
+            class="mb-2 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-mono text-slate-200 outline-none placeholder:text-slate-600 focus:border-amber-500"
+            bind:value={publicAppUrl}
+            placeholder="https://host.tailnet.ts.net"
+            type="url" />
+          <p class="mb-3 text-[10px] leading-relaxed text-slate-500">Optional for local use. Set the HTTPS URL exposed through Tailscale before creating a room.</p>
           <button
             class="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-2.5 text-sm font-semibold text-slate-950 shadow-lg shadow-amber-500/25 transition hover:bg-amber-400 disabled:opacity-60"
             type="button" disabled={isCreatingRoom}
@@ -1182,8 +1248,8 @@
                 <p class="mt-3 break-all font-mono text-xs text-cyan-300">{browserHostUrl}</p>
               </div>
               <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                <div class="flex items-center justify-between"><p class="text-[10px] uppercase tracking-wider text-slate-500">Participant URL</p><button type="button" onclick={() => copyText(buildGuestUrl(room!.signalingUrl))} title="Copy"><iconify-icon icon={copied ? "mdi:check" : "mdi:content-copy"}></iconify-icon></button></div>
-                <p class="mt-3 break-all font-mono text-xs text-purple-300">{buildGuestUrl(room.signalingUrl)}</p>
+                <div class="flex items-center justify-between"><p class="text-[10px] uppercase tracking-wider text-slate-500">Participant URL</p><button type="button" onclick={() => copyText(buildGuestUrl(room!.signalingUrl, room!.publicAppUrl))} title="Copy"><iconify-icon icon={copied ? "mdi:check" : "mdi:content-copy"}></iconify-icon></button></div>
+                <p class="mt-3 break-all font-mono text-xs text-purple-300">{buildGuestUrl(room.signalingUrl, room.publicAppUrl)}</p>
               </div>
             </div>
           </div>

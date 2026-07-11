@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
+    fs,
     net::{IpAddr, SocketAddr},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -9,7 +11,8 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
     },
-    response::IntoResponse,
+    http::{header::CONTENT_TYPE, StatusCode, Uri},
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -29,6 +32,7 @@ pub struct SignalingStatus {
     pub port: u16,
     pub local_ip: Option<String>,
     pub url: Option<String>,
+    pub public_app_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,6 +40,7 @@ pub struct SignalingStatus {
 pub struct RoomInfo {
     pub room_id: String,
     pub signaling_url: String,
+    pub public_app_url: Option<String>,
 }
 
 #[derive(Debug)]
@@ -57,6 +62,8 @@ struct InnerState {
     port: u16,
     local_ip: Option<IpAddr>,
     is_running: bool,
+    public_app_url: Option<String>,
+    static_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +79,8 @@ impl SignalingState {
                 port: DEFAULT_SIGNALING_PORT,
                 local_ip,
                 is_running: false,
+                public_app_url: None,
+                static_dir: None,
             })),
         }
     }
@@ -79,7 +88,7 @@ impl SignalingState {
     pub fn create_room(&self) -> RoomInfo {
         let room_id = Uuid::new_v4().simple().to_string();
         let (tx, _) = broadcast::channel(ROOM_CHANNEL_CAPACITY);
-        let signaling_url = self.room_url(&room_id);
+        let (signaling_url, public_app_url) = self.room_urls(&room_id);
 
         self.inner
             .lock()
@@ -97,6 +106,7 @@ impl SignalingState {
         RoomInfo {
             room_id,
             signaling_url,
+            public_app_url,
         }
     }
 
@@ -118,6 +128,7 @@ impl SignalingState {
             port: inner.port,
             local_ip: local_ip.clone(),
             url: local_ip.map(|ip| format!("ws://{ip}:{}", inner.port)),
+            public_app_url: inner.public_app_url.clone(),
         }
     }
 
@@ -128,14 +139,36 @@ impl SignalingState {
             .is_running = true;
     }
 
-    fn room_url(&self, room_id: &str) -> String {
+    pub fn set_public_app_url(&self, public_app_url: String) -> Result<(), String> {
+        let normalized = normalize_public_app_url(&public_app_url)?;
+        self.inner
+            .lock()
+            .expect("signaling state mutex poisoned")
+            .public_app_url = normalized;
+        Ok(())
+    }
+
+    pub fn set_static_dir(&self, static_dir: Option<PathBuf>) {
+        self.inner
+            .lock()
+            .expect("signaling state mutex poisoned")
+            .static_dir = static_dir;
+    }
+
+    fn room_urls(&self, room_id: &str) -> (String, Option<String>) {
         let inner = self.inner.lock().expect("signaling state mutex poisoned");
+        if let Some(public_app_url) = inner.public_app_url.clone() {
+            return (
+                format!("{}/ws/{room_id}", websocket_origin(&public_app_url)),
+                Some(public_app_url),
+            );
+        }
         let host = inner
             .local_ip
             .map(|ip| ip.to_string())
             .unwrap_or_else(|| "127.0.0.1".to_string());
 
-        format!("ws://{host}:{}/ws/{room_id}", inner.port)
+        (format!("ws://{host}:{}/ws/{room_id}", inner.port), None)
     }
 
     fn room_sender(&self, room_id: &str) -> Option<broadcast::Sender<SignalMessage>> {
@@ -165,8 +198,10 @@ impl SignalingState {
             .rooms
             .get_mut(room_id)
         {
-            room.participants
-                .insert(connection_id, format!("Participant {}", &connection_id.simple().to_string()[..8]));
+            room.participants.insert(
+                connection_id,
+                format!("Participant {}", &connection_id.simple().to_string()[..8]),
+            );
         }
     }
 
@@ -185,7 +220,8 @@ impl SignalingState {
             .rooms
             .get_mut(room_id)
         {
-            room.peer_connections.insert(peer_id.to_string(), connection_id);
+            room.peer_connections
+                .insert(peer_id.to_string(), connection_id);
             room.participants.insert(
                 connection_id,
                 format!("Participant {}", &peer_id[..peer_id.len().min(8)]),
@@ -228,6 +264,40 @@ impl SignalingState {
             .and_then(|room| room.peer_connections.get(peer_id))
             == Some(&connection_id)
     }
+
+    fn static_dir(&self) -> Option<PathBuf> {
+        self.inner
+            .lock()
+            .expect("signaling state mutex poisoned")
+            .static_dir
+            .clone()
+    }
+}
+
+fn normalize_public_app_url(value: &str) -> Result<Option<String>, String> {
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !(value.starts_with("https://") || value.starts_with("http://"))
+        || value.contains(char::is_whitespace)
+    {
+        return Err("public app URL must start with http:// or https://".to_string());
+    }
+    let host = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .unwrap_or_default();
+    if host.is_empty() || host.contains(['/', '?', '#']) {
+        return Err("public app URL must be an origin without a path".to_string());
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn websocket_origin(public_app_url: &str) -> String {
+    public_app_url
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1)
 }
 
 fn is_valid_chat_message(payload: &str) -> bool {
@@ -262,6 +332,7 @@ pub async fn run_server(state: SignalingState) -> Result<(), String> {
     let app = Router::new()
         .route("/ws/:room_id", get(websocket_handler))
         .route("/rooms", get(create_room_handler))
+        .fallback(get(static_handler))
         .with_state(state.clone());
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr)
@@ -276,6 +347,52 @@ pub async fn run_server(state: SignalingState) -> Result<(), String> {
 
 async fn create_room_handler(State(state): State<SignalingState>) -> Json<RoomInfo> {
     Json(state.create_room())
+}
+
+async fn static_handler(State(state): State<SignalingState>, uri: Uri) -> Response {
+    let Some(root) = state.static_dir() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let requested = uri.path().trim_start_matches('/');
+    if requested
+        .split('/')
+        .any(|part| part == ".." || part.contains('\\'))
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let candidate = if requested.is_empty() {
+        root.join("index.html")
+    } else {
+        root.join(requested)
+    };
+    let path = if candidate.is_file() {
+        candidate
+    } else {
+        root.join("index.html")
+    };
+    match fs::read(&path) {
+        Ok(contents) => (
+            StatusCode::OK,
+            [(CONTENT_TYPE, content_type_for(&path))],
+            contents,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn content_type_for(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    }
 }
 
 async fn websocket_handler(
@@ -310,7 +427,11 @@ async fn handle_socket(socket: WebSocket, room_id: String, state: SignalingState
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                         if let Some(id) = value.get("peerId").and_then(serde_json::Value::as_str) {
                             if value.get("type").and_then(serde_json::Value::as_str) == Some("chat")
-                                && !receive_state.connection_matches_peer(&receive_room_id, peer_id, id)
+                                && !receive_state.connection_matches_peer(
+                                    &receive_room_id,
+                                    peer_id,
+                                    id,
+                                )
                             {
                                 continue;
                             }
@@ -368,4 +489,34 @@ async fn handle_socket(socket: WebSocket, room_id: String, state: SignalingState
         }
     }
     state.remove_participant(&room_id, peer_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_https_origin_creates_a_secure_websocket_room_url() {
+        let state = SignalingState::new(None);
+        state
+            .set_public_app_url("https://host.tailnet.ts.net".to_string())
+            .expect("valid public URL");
+
+        let room = state.create_room();
+        assert_eq!(
+            room.public_app_url.as_deref(),
+            Some("https://host.tailnet.ts.net")
+        );
+        assert!(room
+            .signaling_url
+            .starts_with("wss://host.tailnet.ts.net/ws/"));
+    }
+
+    #[test]
+    fn public_app_url_rejects_paths() {
+        let state = SignalingState::new(None);
+        assert!(state
+            .set_public_app_url("https://host.tailnet.ts.net/room".to_string())
+            .is_err());
+    }
 }
