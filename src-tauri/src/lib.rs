@@ -56,6 +56,11 @@ fn frontend_static_dir(app: &tauri::App) -> Option<PathBuf> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let signaling_state = SignalingState::new(network::local_ip());
+    if let Ok(public_app_url) = std::env::var("PUBLIC_APP_URL") {
+        if let Err(error) = signaling_state.set_public_app_url(public_app_url) {
+            eprintln!("invalid PUBLIC_APP_URL: {error}");
+        }
+    }
     let server_state = signaling_state.clone();
 
     tauri::Builder::default()

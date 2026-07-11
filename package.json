@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
+    "start": "bash ./scripts/start-shared.sh",
     "build": "vite build",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

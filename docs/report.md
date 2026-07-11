@@ -160,6 +160,13 @@ Phase 8: Stream statistics and network feedback.
 Read this file before making changes.
 Continue from Phase 8 (stream statistics and network feedback).
 The app supports a multi-participant mesh: every participant can use camera, microphone and screen sharing.
+
+### Tauri shared development
+
+- Added a Docker Compose Tailscale sidecar using Linux host networking, while keeping the Tauri application and media capture on the host.
+- Added `pnpm start`, which loads `.env`, starts and waits for Tailscale, configures the HTTPS proxy to local port `17777`, then launches `pnpm tauri:dev`. The `pnpm dev` command remains local-only.
+- Added `.env.example` with placeholder-only `TAILSCALE_AUTHKEY` and `PUBLIC_APP_URL`; `.env` remains ignored by Git.
+- The Tauri server now reads `PUBLIC_APP_URL` from its inherited environment so generated room links use the configured HTTPS/WSS origin automatically.
 All prior phases are complete and tested. Do not restart completed work.
 
 Update this file before ending the session.

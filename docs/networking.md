@@ -35,6 +35,24 @@ With Tailscale, Hamachi, ZeroTier or similar tools, users should connect to the 
 
 ### Tailscale HTTPS URL
 
+#### Tauri host with Docker Tailscale
+
+The recommended development command keeps Tauri on the host and uses Docker only for the Tailscale node. Copy `.env.example` to `.env`, set `TAILSCALE_AUTHKEY` and `PUBLIC_APP_URL`, then run:
+
+```bash
+pnpm start
+```
+
+The script starts the `tailscale` Compose service, waits for it to receive a tailnet IP, configures `tailscale serve --https=443` to proxy `127.0.0.1:17777`, and launches `pnpm tauri:dev`. The Tauri process inherits `PUBLIC_APP_URL`, so rooms automatically use secure `https://` and `wss://` links. This Compose mode uses Linux host networking. `pnpm dev` remains a local-only frontend workflow.
+
+To stop the tunnel after closing Tauri:
+
+```bash
+docker compose down
+```
+
+#### Manual host setup
+
 For shareable browser links, start Tailscale on the host and obtain its MagicDNS hostname:
 
 ```bash

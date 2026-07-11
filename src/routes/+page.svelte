@@ -1404,6 +1404,14 @@
                 >
               </div>
             {/if}
+            {#if signalingStatus?.publicAppUrl}
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] text-slate-500">Public URL</span>
+                <span class="truncate text-[11px] font-mono text-cyan-300"
+                  >{signalingStatus.publicAppUrl}</span
+                >
+              </div>
+            {/if}
           </div>
         </div>
       {:else}
