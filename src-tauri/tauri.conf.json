@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Streaming Open",
+  "productName": "PeerCast",
   "version": "0.1.0",
-  "identifier": "dev.guicoelho.streamingopen",
+  "identifier": "dev.guicoelho.peercast",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "useHttpsScheme": true,
-        "title": "Streaming Open",
+        "title": "PeerCast",
         "width": 1180,
         "height": 760,
         "minWidth": 900,

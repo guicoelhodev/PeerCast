@@ -1,7 +1,7 @@
 {
-  "name": "streaming-open",
+  "name": "peercast",
   "version": "0.1.0",
-  "description": "Local-first Tauri screen share and video call MVP",
+  "description": "Local-first Tauri screen sharing and video calls",
   "type": "module",
   "scripts": {
     "dev": "vite dev",

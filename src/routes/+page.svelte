@@ -172,9 +172,9 @@
   onMount(async () => {
     webrtcAvailable = typeof RTCPeerConnection !== "undefined";
     myPeerId =
-      sessionStorage.getItem("streaming-open-peer-id") ?? crypto.randomUUID();
-    sessionStorage.setItem("streaming-open-peer-id", myPeerId);
-    displayName = sessionStorage.getItem("streaming-open-display-name") ?? "";
+      sessionStorage.getItem("peercast-peer-id") ?? crypto.randomUUID();
+    sessionStorage.setItem("peercast-peer-id", myPeerId);
+    displayName = sessionStorage.getItem("peercast-display-name") ?? "";
 
     const params = new URLSearchParams(window.location.search);
     const roomUrl = params.get("room");
@@ -350,7 +350,7 @@
     }
 
     displayName = normalizedName;
-    sessionStorage.setItem("streaming-open-display-name", displayName);
+    sessionStorage.setItem("peercast-display-name", displayName);
 
     if (role === "host") {
       errorMessage = "";
@@ -1309,7 +1309,7 @@
     <div
       class="flex h-12 items-center justify-between border-b border-slate-800 px-4"
     >
-      <span class="text-sm font-semibold tracking-wide">Streaming Open</span>
+      <span class="text-sm font-semibold tracking-wide">PeerCast</span>
       <span
         class="rounded {isTauri
           ? 'bg-amber-400/20 text-amber-300'

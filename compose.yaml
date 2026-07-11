@@ -5,7 +5,7 @@ services:
     environment:
       TS_AUTHKEY: ${TAILSCALE_AUTHKEY:?Set TAILSCALE_AUTHKEY in .env}
       TS_AUTH_ONCE: "true"
-      TS_HOSTNAME: streaming-open
+      TS_HOSTNAME: peercast
       TS_STATE_DIR: /var/lib/tailscale
     volumes:
       - tailscale-state:/var/lib/tailscale
