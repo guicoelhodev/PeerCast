@@ -41,6 +41,7 @@ pub struct RoomInfo {
 struct Room {
     tx: broadcast::Sender<SignalMessage>,
     participants: HashMap<Uuid, String>,
+    peer_connections: HashMap<String, Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +89,7 @@ impl SignalingState {
                 Room {
                     tx,
                     participants: HashMap::new(),
+                    peer_connections: HashMap::new(),
                 },
             );
 
@@ -182,6 +184,7 @@ impl SignalingState {
             .rooms
             .get_mut(room_id)
         {
+            room.peer_connections.insert(peer_id.to_string(), connection_id);
             room.participants.insert(
                 connection_id,
                 format!("Participant {}", &peer_id[..peer_id.len().min(8)]),
@@ -199,6 +202,20 @@ impl SignalingState {
         {
             room.participants.remove(&connection_id);
         }
+    }
+
+    fn disconnect_peer(&self, room_id: &str, connection_id: Uuid, peer_id: &str) -> bool {
+        let mut inner = self.inner.lock().expect("signaling state mutex poisoned");
+        let Some(room) = inner.rooms.get_mut(room_id) else {
+            return false;
+        };
+
+        if room.peer_connections.get(peer_id) != Some(&connection_id) {
+            return false;
+        }
+
+        room.peer_connections.remove(peer_id);
+        true
     }
 }
 
@@ -243,10 +260,19 @@ async fn handle_socket(socket: WebSocket, room_id: String, state: SignalingState
 
     let receive_state = state.clone();
     let receive_room_id = room_id.clone();
+    let client_peer_id = Arc::new(Mutex::new(None::<String>));
+    let receive_client_peer_id = client_peer_id.clone();
     let receive_task = tokio::spawn(async move {
         while let Some(Ok(message)) = receiver.next().await {
             match message {
                 Message::Text(text) => {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(id) = value.get("peerId").and_then(serde_json::Value::as_str) {
+                            *receive_client_peer_id
+                                .lock()
+                                .expect("client peer ID mutex poisoned") = Some(id.to_string());
+                        }
+                    }
                     receive_state.identify_participant(&receive_room_id, peer_id, &text);
                     let _ = tx.send(SignalMessage {
                         sender_id: peer_id,
@@ -276,5 +302,24 @@ async fn handle_socket(socket: WebSocket, room_id: String, state: SignalingState
         _ = send_task => {}
     }
 
+    let client_peer_id = client_peer_id
+        .lock()
+        .expect("client peer ID mutex poisoned")
+        .clone();
+    if let Some(client_peer_id) = client_peer_id {
+        if state.disconnect_peer(&room_id, peer_id, &client_peer_id) {
+            let payload = serde_json::json!({
+                "type": "participant-left",
+                "peerId": client_peer_id,
+            })
+            .to_string();
+            let _ = state.room_sender(&room_id).map(|tx| {
+                tx.send(SignalMessage {
+                    sender_id: Uuid::new_v4(),
+                    payload,
+                })
+            });
+        }
+    }
     state.remove_participant(&room_id, peer_id);
 }

@@ -125,6 +125,23 @@ test("1 host + 3 guests join and connect via WebRTC", async ({ browser }) => {
     )
     .toBe(true);
 
+  // A host refresh creates a new peer ID and must trigger guests to renegotiate.
+  await hostPage.reload();
+  await expect(
+    hostPage
+      .locator("text=Peers")
+      .locator("..")
+      .locator("span.text-slate-300"),
+  ).toContainText("3", { timeout: 30000 });
+  for (const guestPage of guestPages) {
+    await expect(
+      guestPage
+        .locator("text=Peers")
+        .locator("..")
+        .locator("span.text-slate-300"),
+    ).toContainText("3", { timeout: 30000 });
+  }
+
   // Cleanup
   await hostContext.close();
   for (const ctx of guestContexts) {

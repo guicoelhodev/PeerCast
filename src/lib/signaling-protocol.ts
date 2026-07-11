@@ -1,5 +1,6 @@
 export type SignalMessage =
   | { type: "ready"; peerId: string }
+  | { type: "participant-left"; peerId: string }
   | {
       type: "offer";
       peerId: string;
@@ -18,6 +19,12 @@ export type SignalMessage =
       peerId: string;
       targetPeerId: string;
       candidate: RTCIceCandidateInit;
+    }
+  | {
+      type: "audio-kind";
+      peerId: string;
+      targetPeerId: string;
+      audioKind: "microphone" | "system";
     };
 
 export function serializeSignalMessage(message: SignalMessage): string {
@@ -37,6 +44,8 @@ export function parseSignalMessage(data: string): SignalMessage | null {
     switch (value.type) {
       case "ready":
         return { type: "ready", peerId };
+      case "participant-left":
+        return { type: "participant-left", peerId };
       case "offer":
       case "answer":
         if (typeof value.targetPeerId === "string" && isSessionDescription(value.description)) {
@@ -56,6 +65,19 @@ export function parseSignalMessage(data: string): SignalMessage | null {
             peerId,
             targetPeerId: value.targetPeerId,
             candidate: value.candidate,
+          };
+        }
+        return null;
+      case "audio-kind":
+        if (
+          typeof value.targetPeerId === "string" &&
+          (value.audioKind === "microphone" || value.audioKind === "system")
+        ) {
+          return {
+            type: "audio-kind",
+            peerId,
+            targetPeerId: value.targetPeerId,
+            audioKind: value.audioKind,
           };
         }
         return null;
