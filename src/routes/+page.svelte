@@ -89,17 +89,13 @@
     id: string;
     pc: RTCPeerConnection;
     stream: MediaStream;
-    micStream: MediaStream;
-    systemAudioStream: MediaStream;
+    audioStream: MediaStream;
     connected: boolean;
     isHost: boolean;
     videoEl: HTMLVideoElement | null;
-    micAudioEl: HTMLAudioElement | null;
-    systemAudioEl: HTMLAudioElement | null;
-    micVolume: number;
-    systemVolume: number;
+    audioEl: HTMLAudioElement | null;
+    audioVolume: number;
     systemAudioSender: RTCRtpSender | null;
-    pendingAudioKinds: Array<"microphone" | "system">;
     displayName: string;
     isMuted: boolean;
     isSpeaking: boolean;
@@ -455,10 +451,14 @@
   function bindGuestOnTrack(guest: GuestPeer) {
     guest.pc.ontrack = (event) => {
       if (event.track.kind === "audio") {
-        const kind = guest.pendingAudioKinds.shift() ?? "microphone";
-        const target =
-          kind === "system" ? guest.systemAudioStream : guest.micStream;
-        target.addTrack(event.track);
+        // A remote peer can send microphone and display audio in either order.
+        // Keep them in one MediaStream so playback never depends on a separate
+        // signaling message being received before the WebRTC track event.
+        guest.audioStream.addTrack(event.track);
+        event.track.onended = () => {
+          guest.audioStream.removeTrack(event.track);
+          guestPeers = guestPeers;
+        };
       } else {
         guest.stream.addTrack(event.track);
         if (guest.videoState === "off") guest.videoState = "camera";
@@ -507,7 +507,7 @@
 
     for (const guest of guestPeers) {
       guest.isSpeaking =
-        !guest.isMuted && getStreamAudioLevel(guest.micStream, guest.id) > 3;
+        !guest.isMuted && getStreamAudioLevel(guest.audioStream, guest.id) > 3;
     }
     guestPeers = guestPeers;
   }
@@ -688,21 +688,17 @@
         id: guestId,
         pc,
         stream: new MediaStream(),
-        micStream: new MediaStream(),
-        systemAudioStream: new MediaStream(),
+        audioStream: new MediaStream(),
         connected: false,
         isHost: false,
-        micVolume: 1,
-        systemVolume: 1,
+        audioVolume: 1,
         systemAudioSender: null,
-        pendingAudioKinds: [],
         displayName: message.displayName ?? "Participant",
         isMuted: message.microphoneMuted ?? false,
         isSpeaking: false,
         videoState: "off",
         videoEl: null,
-        micAudioEl: null,
-        systemAudioEl: null,
+        audioEl: null,
       };
       bindGuestOnTrack(guest);
       guestPeers = [...guestPeers, guest];
@@ -758,21 +754,17 @@
           id: message.peerId,
           pc,
           stream: new MediaStream(),
-          micStream: new MediaStream(),
-          systemAudioStream: new MediaStream(),
+          audioStream: new MediaStream(),
           connected: false,
           isHost: message.isHost === true,
-          micVolume: 1,
-          systemVolume: 1,
+          audioVolume: 1,
           systemAudioSender: null,
-          pendingAudioKinds: [],
           displayName: message.displayName ?? "Participant",
           isMuted: message.microphoneMuted ?? false,
           isSpeaking: false,
           videoState: "off",
           videoEl: null,
-          micAudioEl: null,
-          systemAudioEl: null,
+          audioEl: null,
         };
         bindGuestOnTrack(guest);
         guestPeers = [...guestPeers, guest];
@@ -818,12 +810,6 @@
       if (guest) {
         await guest.pc.addIceCandidate(message.candidate);
       }
-    }
-
-    if (message.type === "audio-kind") {
-      if (message.targetPeerId !== myPeerId) return;
-      const guest = guestPeers.find((peer) => peer.id === message.peerId);
-      if (guest) guest.pendingAudioKinds.push(message.audioKind);
     }
 
     if (message.type === "microphone-state") {
@@ -969,14 +955,29 @@
     const quality = getSelectedScreenQuality();
 
     try {
-      screenStream = await navigator.mediaDevices.getDisplayMedia({
+      const displayOptions: Omit<DisplayMediaStreamOptions, "audio"> & {
+        audio?: boolean | (MediaTrackConstraints & {
+          suppressLocalAudioPlayback?: boolean;
+        });
+        surfaceSwitching?: "include" | "exclude";
+        systemAudio?: "include" | "exclude";
+        windowAudio?: "exclude" | "window" | "system";
+      } = {
         video: {
           width: { ideal: quality.width },
           height: { ideal: quality.height },
           frameRate: { ideal: quality.fps },
         },
-        audio: true,
-      });
+        audio: { suppressLocalAudioPlayback: false },
+        // Ask Chromium to offer audio-capable sources in the full picker.
+        // Unsupported WebViews ignore these hints.
+        surfaceSwitching: "include",
+        systemAudio: "include",
+        windowAudio: "system",
+      };
+
+      screenStream =
+        await navigator.mediaDevices.getDisplayMedia(displayOptions);
 
       screenShareState = "Running";
 
@@ -1007,7 +1008,7 @@
       await applyScreenQuality(screenTrack, quality);
       infoMessage = screenAudioTrack
         ? `Screen and system audio sharing at ${quality.width}x${quality.height}, ${quality.fps} FPS, ${formatBitrate(quality.bitrate)}.`
-        : "Screen sharing started without system audio. Choose a source that offers audio to share it.";
+        : "Screen sharing started without audio. On Linux, choose a browser tab in the picker and enable Share tab audio; entire-screen and window capture usually provide video only.";
     } catch (error) {
       screenShareState = "Stopped";
       if (String(error) !== "AbortError") {
@@ -1068,12 +1069,6 @@
 
   function sendSystemAudioTrackToAllPeers(track: MediaStreamTrack) {
     for (const guest of guestPeers) {
-      sendSignal({
-        type: "audio-kind",
-        peerId: myPeerId,
-        targetPeerId: guest.id,
-        audioKind: "system",
-      });
       addSystemAudioTrackToPeer(guest, track);
     }
   }
@@ -1212,9 +1207,10 @@
     if (localVideo) localVideo.srcObject = localStream;
     for (const guest of guestPeers) {
       if (guest.videoEl) guest.videoEl.srcObject = guest.stream;
-      if (guest.micAudioEl) guest.micAudioEl.srcObject = guest.micStream;
-      if (guest.systemAudioEl)
-        guest.systemAudioEl.srcObject = guest.systemAudioStream;
+      if (guest.audioEl) {
+        guest.audioEl.srcObject = guest.audioStream;
+        guest.audioEl.play().catch(() => {});
+      }
     }
   }
 
@@ -1241,18 +1237,9 @@
     }
   }
 
-  function setGuestVolume(
-    guest: GuestPeer,
-    source: "mic" | "system",
-    volume: number,
-  ) {
-    if (source === "mic") {
-      guest.micVolume = volume;
-      if (guest.micAudioEl) guest.micAudioEl.volume = volume;
-    } else {
-      guest.systemVolume = volume;
-      if (guest.systemAudioEl) guest.systemAudioEl.volume = volume;
-    }
+  function setGuestVolume(guest: GuestPeer, volume: number) {
+    guest.audioVolume = volume;
+    if (guest.audioEl) guest.audioEl.volume = volume;
   }
 
   function getVideoGridClass(participantCount: number) {
@@ -1819,6 +1806,17 @@
                   Resolution and FPS are capture hints; bitrate is applied to
                   video senders when supported.
                 </p>
+                {#if !screenAudioAvailable}
+                  <div
+                    class="rounded border border-amber-400/30 bg-amber-400/10 px-2 py-2 text-[10px] leading-relaxed text-amber-200"
+                    role="alert"
+                  >
+                    <span class="font-semibold">No transmission audio.</span>
+                    Stop sharing, choose a browser tab, and enable Share tab
+                    audio. On Linux, sharing an entire screen or window usually
+                    captures video only.
+                  </div>
+                {/if}
               </div>
             {/if}
           </div>
@@ -2206,10 +2204,7 @@
                   </button>
                 </div>
                 <div
-                  class="absolute bottom-3 right-3 z-10 flex gap-2 rounded-lg bg-slate-950/70 px-2 py-2 {guest.systemAudioStream.getAudioTracks()
-                    .length > 0
-                    ? 'opacity-100'
-                    : 'opacity-0 group-hover:opacity-100'} backdrop-blur transition-opacity"
+                  class="absolute bottom-3 right-3 z-10 flex rounded-lg bg-slate-950/70 px-2 py-2 opacity-0 backdrop-blur transition-opacity group-hover:opacity-100"
                 >
                   <div class="flex flex-col items-center gap-2">
                     <input
@@ -2218,47 +2213,20 @@
                       min="0"
                       max="1"
                       step="0.01"
-                      value={guest.micVolume}
+                      value={guest.audioVolume}
                       oninput={(e) =>
                         setGuestVolume(
                           guest,
-                          "mic",
                           parseFloat(e.currentTarget.value),
                         )}
                     />
                     <iconify-icon
-                      icon={guest.micVolume === 0
+                      icon={guest.audioVolume === 0
                         ? "mdi:microphone-off"
-                        : "mdi:microphone"}
+                        : "mdi:volume-high"}
                       class="text-lg text-slate-300"
                     ></iconify-icon>
                   </div>
-                  {#if guest.systemAudioStream.getAudioTracks().length > 0}
-                    <div
-                      class="flex flex-col items-center gap-2 border-l border-slate-700 pl-2"
-                    >
-                      <input
-                        class="volume-slider cursor-pointer accent-purple-400"
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        value={guest.systemVolume}
-                        oninput={(e) =>
-                          setGuestVolume(
-                            guest,
-                            "system",
-                            parseFloat(e.currentTarget.value),
-                          )}
-                      />
-                      <iconify-icon
-                        icon={guest.systemVolume === 0
-                          ? "mdi:volume-off"
-                          : "mdi:volume-high"}
-                        class="text-lg text-purple-300"
-                      ></iconify-icon>
-                    </div>
-                  {/if}
                 </div>
                 {#if guest.videoState === "off" || !hasActiveVideo(guest.stream)}
                   <div
@@ -2282,8 +2250,7 @@
                   muted
                   playsinline
                 ></video>
-                <audio bind:this={guest.micAudioEl} autoplay></audio>
-                <audio bind:this={guest.systemAudioEl} autoplay></audio>
+                <audio bind:this={guest.audioEl} autoplay playsinline></audio>
               </div>
             {/each}
           </div>
