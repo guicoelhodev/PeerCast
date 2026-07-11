@@ -72,6 +72,12 @@ select {
   min-height: 0;
 }
 
+.video-tile video,
+video:fullscreen {
+  object-fit: contain !important;
+  background: #000;
+}
+
 .volume-slider {
   width: 0.85rem;
   height: 5rem;

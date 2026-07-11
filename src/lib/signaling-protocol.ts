@@ -16,6 +16,7 @@ export type SignalMessage =
       isHost?: boolean;
       displayName?: string;
       microphoneMuted?: boolean;
+      videoState?: "camera" | "screen" | "off";
       description: RTCSessionDescriptionInit;
     }
   | {
@@ -24,6 +25,7 @@ export type SignalMessage =
       targetPeerId: string;
       displayName?: string;
       microphoneMuted?: boolean;
+      videoState?: "camera" | "screen" | "off";
       description: RTCSessionDescriptionInit;
     }
   | {
@@ -113,6 +115,11 @@ export function parseSignalMessage(data: string): SignalMessage | null {
               : {}),
             ...(typeof value.microphoneMuted === "boolean"
               ? { microphoneMuted: value.microphoneMuted }
+              : {}),
+            ...(value.videoState === "camera" ||
+            value.videoState === "screen" ||
+            value.videoState === "off"
+              ? { videoState: value.videoState }
               : {}),
             description: value.description,
           };

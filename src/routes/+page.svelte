@@ -34,6 +34,11 @@
     bitrate: number;
   };
 
+  type CaptureDimensions = {
+    width: number;
+    height: number;
+  };
+
   type ChatMessage = {
     id: string;
     peerId: string;
@@ -45,7 +50,7 @@
   const screenQualityPresets: ScreenQualityPreset[] = [
     {
       id: "low",
-      label: "Low - 720p30",
+      label: "Low - up to 720p30",
       width: 1280,
       height: 720,
       fps: 30,
@@ -53,7 +58,7 @@
     },
     {
       id: "balanced",
-      label: "Balanced - 1080p30",
+      label: "Balanced - up to 1080p30",
       width: 1920,
       height: 1080,
       fps: 30,
@@ -61,7 +66,7 @@
     },
     {
       id: "high",
-      label: "High - 1080p60",
+      label: "High - up to 1080p60",
       width: 1920,
       height: 1080,
       fps: 60,
@@ -69,7 +74,7 @@
     },
     {
       id: "ultra",
-      label: "Ultra - 1440p60",
+      label: "Ultra - up to 1440p60",
       width: 2560,
       height: 1440,
       fps: 60,
@@ -77,7 +82,7 @@
     },
     {
       id: "4k",
-      label: "4K Experimental - 4K30",
+      label: "4K Experimental - up to 4K30",
       width: 3840,
       height: 2160,
       fps: 30,
@@ -133,6 +138,7 @@
   let wasCameraOnBeforeShare = false;
   let screenAudioAvailable = false;
   let screenStream: MediaStream | null = null;
+  let screenCaptureDimensions: CaptureDimensions | null = null;
   let webrtcAvailable = true;
   let isTauri =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -717,6 +723,7 @@
         isHost: peerRole === "host",
         displayName,
         microphoneMuted: micState !== "Active",
+        videoState: getLocalVideoState(),
         description: offer,
       });
       infoMessage = `Offer sent to ${guest.displayName}.`;
@@ -762,7 +769,7 @@
           displayName: message.displayName ?? "Participant",
           isMuted: message.microphoneMuted ?? false,
           isSpeaking: false,
-          videoState: "off",
+          videoState: message.videoState ?? "off",
           videoEl: null,
           audioEl: null,
         };
@@ -772,6 +779,11 @@
         guest.isHost = true;
         guest.displayName = message.displayName ?? guest.displayName;
         guest.isMuted = message.microphoneMuted ?? guest.isMuted;
+        guestPeers = guestPeers;
+      }
+
+      if (message.videoState) {
+        guest.videoState = message.videoState;
         guestPeers = guestPeers;
       }
 
@@ -786,6 +798,7 @@
         targetPeerId: message.peerId,
         displayName,
         microphoneMuted: micState !== "Active",
+        videoState: getLocalVideoState(),
         description: answer,
       });
       infoMessage = "Answer sent. Waiting for peer connection.";
@@ -798,6 +811,7 @@
       if (!guest) return;
 
       guest.isMuted = message.microphoneMuted ?? guest.isMuted;
+      guest.videoState = message.videoState ?? guest.videoState;
       guestPeers = guestPeers;
       await guest.pc.setRemoteDescription(message.description);
       infoMessage = `${guest.displayName} connected.`;
@@ -956,9 +970,11 @@
 
     try {
       const displayOptions: Omit<DisplayMediaStreamOptions, "audio"> & {
-        audio?: boolean | (MediaTrackConstraints & {
-          suppressLocalAudioPlayback?: boolean;
-        });
+        audio?:
+          | boolean
+          | (MediaTrackConstraints & {
+              suppressLocalAudioPlayback?: boolean;
+            });
         surfaceSwitching?: "include" | "exclude";
         systemAudio?: "include" | "exclude";
         windowAudio?: "exclude" | "window" | "system";
@@ -982,6 +998,7 @@
       screenShareState = "Running";
 
       const screenTrack = screenStream.getVideoTracks()[0];
+      screenCaptureDimensions = getCaptureDimensions(screenTrack);
       screenTrack.onended = () => stopScreenShare();
       const screenAudioTrack = screenStream.getAudioTracks()[0];
       screenAudioAvailable = Boolean(screenAudioTrack);
@@ -1006,8 +1023,9 @@
         sendSystemAudioTrackToAllPeers(screenAudioTrack);
       }
       await applyScreenQuality(screenTrack, quality);
+      const targetSize = getScreenQualityTarget(quality);
       infoMessage = screenAudioTrack
-        ? `Screen and system audio sharing at up to ${quality.fps} FPS and ${formatBitrate(quality.bitrate)}. The original screen proportions are preserved.`
+        ? `Screen and system audio sharing at up to ${formatCaptureDimensions(targetSize)}, ${quality.fps} FPS, and ${formatBitrate(quality.bitrate)}.`
         : "Screen sharing started without audio. On Linux, choose a browser tab in the picker and enable Share tab audio; entire-screen and window capture usually provide video only.";
     } catch (error) {
       screenShareState = "Stopped";
@@ -1022,6 +1040,7 @@
 
     screenStream.getTracks().forEach((track) => track.stop());
     screenStream = null;
+    screenCaptureDimensions = null;
     localStream = null;
     screenShareState = "Stopped";
     screenAudioAvailable = false;
@@ -1051,6 +1070,12 @@
 
   function sendVideoState(videoState: "camera" | "screen" | "off") {
     sendSignal({ type: "video-state", peerId: myPeerId, videoState });
+  }
+
+  function getLocalVideoState(): "camera" | "screen" | "off" {
+    if (screenShareState === "Running") return "screen";
+    if (cameraState === "Running") return "camera";
+    return "off";
   }
 
   function sendVideoTrackToAllPeers(track: MediaStreamTrack) {
@@ -1120,13 +1145,48 @@
     if (!track) return;
 
     await applyScreenQuality(track, quality);
-    infoMessage = `Quality updated: ${quality.width}x${quality.height}, ${quality.fps} FPS, ${formatBitrate(quality.bitrate)}.`;
+    infoMessage = `Quality updated: up to ${formatCaptureDimensions(getScreenQualityTarget(quality))}, ${quality.fps} FPS, ${formatBitrate(quality.bitrate)}.`;
+  }
+
+  function getCaptureDimensions(
+    track: MediaStreamTrack,
+  ): CaptureDimensions | null {
+    const { width, height } = track.getSettings();
+    return width && height ? { width, height } : null;
+  }
+
+  function getScreenQualityTarget(
+    quality: ScreenQualityPreset,
+  ): CaptureDimensions | null {
+    if (!screenCaptureDimensions) return null;
+
+    const scale = Math.min(
+      1,
+      quality.width / screenCaptureDimensions.width,
+      quality.height / screenCaptureDimensions.height,
+    );
+
+    return {
+      width: Math.max(
+        2,
+        Math.floor((screenCaptureDimensions.width * scale) / 2) * 2,
+      ),
+      height: Math.max(
+        2,
+        Math.floor((screenCaptureDimensions.height * scale) / 2) * 2,
+      ),
+    };
+  }
+
+  function formatCaptureDimensions(size: CaptureDimensions | null) {
+    return size ? `${size.width}x${size.height}` : "the selected resolution";
   }
 
   async function applyScreenQuality(
     track: MediaStreamTrack,
     quality: ScreenQualityPreset,
   ) {
+    const targetSize = getScreenQualityTarget(quality);
     try {
       await track.applyConstraints({
         frameRate: { ideal: quality.fps },
@@ -1148,6 +1208,12 @@
             parameters.encodings.length > 0 ? parameters.encodings : [{}];
           parameters.encodings[0].maxBitrate = quality.bitrate;
           parameters.encodings[0].maxFramerate = quality.fps;
+          // Downscale the encoded stream rather than the capture track. This
+          // makes the selected resolution observable by guests while keeping
+          // the original display aspect ratio intact.
+          parameters.encodings[0].scaleResolutionDownBy = targetSize
+            ? Math.max(1, screenCaptureDimensions!.width / targetSize.width)
+            : 1;
           await sender.setParameters(parameters);
         } catch {
           // Older WebViews may not implement sender quality parameters.
@@ -1170,6 +1236,7 @@
         targetPeerId: guest.id,
         isHost: peerRole === "host",
         displayName,
+        videoState: getLocalVideoState(),
         description: offer,
       });
     } catch {
@@ -1277,6 +1344,7 @@
     ws = null;
     dataChannel = null;
     screenStream = null;
+    screenCaptureDimensions = null;
     localStream = null;
     microphoneStream = null;
     microphoneTrack = null;
@@ -1781,42 +1849,44 @@
                 ></iconify-icon>
               </button>
             </div>
-            {#if screenShareState === "Running"}
-              <div class="mt-3 space-y-2 rounded-lg bg-slate-800/40 p-2.5">
-                <div class="flex items-center justify-between">
-                  <p
-                    class="text-[10px] font-semibold uppercase tracking-[0.15em] text-slate-500"
-                  >
-                    Screen quality
-                  </p>
-                  <span class="text-[10px] text-purple-300">Live</span>
-                </div>
-                <select
-                  class="w-full rounded border border-slate-700 bg-slate-800 px-2 py-1.5 text-[11px] text-slate-200 outline-none focus:border-purple-500"
-                  bind:value={selectedScreenQualityId}
-                  onchange={updateScreenQuality}
+            <div class="mt-3 space-y-2 rounded-lg bg-slate-800/40 p-2.5">
+              <div class="flex items-center justify-between">
+                <p
+                  class="text-[10px] font-semibold uppercase tracking-[0.15em] text-slate-500"
                 >
-                  {#each screenQualityPresets as preset}
-                    <option value={preset.id}>{preset.label}</option>
-                  {/each}
-                </select>
-                <p class="text-[10px] leading-relaxed text-slate-500">
-                  The original screen proportions are preserved. FPS and
-                  bitrate are applied when supported.
+                  Screen quality
                 </p>
-                {#if !screenAudioAvailable}
-                  <div
-                    class="rounded border border-amber-400/30 bg-amber-400/10 px-2 py-2 text-[10px] leading-relaxed text-amber-200"
-                    role="alert"
-                  >
-                    <span class="font-semibold">No transmission audio.</span>
-                    Stop sharing, choose a browser tab, and enable Share tab
-                    audio. On Linux, sharing an entire screen or window usually
-                    captures video only.
-                  </div>
-                {/if}
+                <span class="text-[10px] text-purple-300"
+                  >{screenShareState === "Running"
+                    ? "Live"
+                    : "Next share"}</span
+                >
               </div>
-            {/if}
+              <select
+                class="w-full rounded border border-slate-700 bg-slate-800 px-2 py-1.5 text-[11px] text-slate-200 outline-none focus:border-purple-500"
+                bind:value={selectedScreenQualityId}
+                onchange={updateScreenQuality}
+              >
+                {#each screenQualityPresets as preset}
+                  <option value={preset.id}>{preset.label}</option>
+                {/each}
+              </select>
+              <p class="text-[10px] leading-relaxed text-slate-500">
+                The original screen proportions are preserved. Resolution, FPS,
+                and bitrate are applied when supported.
+              </p>
+              {#if screenShareState === "Running" && !screenAudioAvailable}
+                <div
+                  class="rounded border border-amber-400/30 bg-amber-400/10 px-2 py-2 text-[10px] leading-relaxed text-amber-200"
+                  role="alert"
+                >
+                  <span class="font-semibold">No transmission audio.</span>
+                  Stop sharing, choose a browser tab, and enable Share tab audio.
+                  On Linux, sharing an entire screen or window usually captures video
+                  only.
+                </div>
+              {/if}
+            </div>
           </div>
         {/if}
       {/if}
@@ -2159,9 +2229,7 @@
                 </div>
               {/if}
               <video
-                class="h-full w-full {screenShareState === 'Running'
-                  ? 'object-contain bg-black'
-                  : 'object-cover'}"
+                class="h-full w-full bg-black object-contain"
                 autoplay
                 bind:this={localVideo}
                 muted
@@ -2241,10 +2309,8 @@
                   </div>
                 {/if}
                 <video
-                  class="h-full w-full {guest.videoState === 'screen'
-                    ? 'object-contain bg-black'
-                    : 'object-cover'} {guest.videoState === 'off' ||
-                  !hasActiveVideo(guest.stream)
+                  class="h-full w-full bg-black object-contain {guest.videoState ===
+                    'off' || !hasActiveVideo(guest.stream)
                     ? 'invisible'
                     : ''}"
                   autoplay
