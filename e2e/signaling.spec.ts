@@ -71,6 +71,8 @@ test("1 host + 3 guests join and connect via WebRTC", async ({ browser }) => {
   // Host: open with ?role=host&room=<url>
   const hostUrl = `/?role=host&room=${encodeURIComponent(roomUrl)}`;
   await hostPage.goto(hostUrl);
+  await hostPage.getByLabel("Your name").fill("Host");
+  await hostPage.getByRole("button", { name: "Join" }).click();
 
   // Wait for host to connect to signaling
   await expect(
@@ -86,6 +88,10 @@ test("1 host + 3 guests join and connect via WebRTC", async ({ browser }) => {
       const page = await ctx.newPage();
       const guestUrl = `/?room=${encodeURIComponent(roomUrl)}`;
       await page.goto(guestUrl);
+      await page
+        .getByLabel("Your name")
+        .fill(`Guest ${guestContexts.indexOf(ctx) + 1}`);
+      await page.getByRole("button", { name: "Join" }).click();
       return page;
     }),
   );
@@ -102,10 +108,7 @@ test("1 host + 3 guests join and connect via WebRTC", async ({ browser }) => {
 
   // Wait for host to see 3 peers (WebRTC connections established)
   await expect(
-    hostPage
-      .locator("text=Peers")
-      .locator("..")
-      .locator("span.text-slate-300"),
+    hostPage.locator("text=Peers").locator("..").locator("span.text-slate-300"),
   ).toContainText("3", { timeout: 30000 });
 
   // Verify each guest sees "Host" label on their remote video (stream received)
@@ -118,9 +121,17 @@ test("1 host + 3 guests join and connect via WebRTC", async ({ browser }) => {
   await expect
     .poll(
       () =>
-        hostPage.locator("video").evaluateAll((videos) =>
-          videos.slice(1).some((video) => video.srcObject instanceof MediaStream && video.srcObject.getVideoTracks().length > 0),
-        ),
+        hostPage
+          .locator("video")
+          .evaluateAll((videos) =>
+            videos
+              .slice(1)
+              .some(
+                (video) =>
+                  video.srcObject instanceof MediaStream &&
+                  video.srcObject.getVideoTracks().length > 0,
+              ),
+          ),
       { timeout: 30000 },
     )
     .toBe(true);
@@ -128,10 +139,7 @@ test("1 host + 3 guests join and connect via WebRTC", async ({ browser }) => {
   // A host refresh creates a new peer ID and must trigger guests to renegotiate.
   await hostPage.reload();
   await expect(
-    hostPage
-      .locator("text=Peers")
-      .locator("..")
-      .locator("span.text-slate-300"),
+    hostPage.locator("text=Peers").locator("..").locator("span.text-slate-300"),
   ).toContainText("3", { timeout: 30000 });
   for (const guestPage of guestPages) {
     await expect(
@@ -149,7 +157,9 @@ test("1 host + 3 guests join and connect via WebRTC", async ({ browser }) => {
   }
 });
 
-test("room chat broadcasts messages to connected participants", async ({ browser }) => {
+test("room chat broadcasts messages to connected participants", async ({
+  browser,
+}) => {
   const hostContext = await browser.newContext();
   const guestContext = await browser.newContext();
   const hostPage = await hostContext.newPage();
@@ -157,6 +167,10 @@ test("room chat broadcasts messages to connected participants", async ({ browser
 
   await hostPage.goto(`/?role=host&room=${encodeURIComponent(roomUrl)}`);
   await guestPage.goto(`/?room=${encodeURIComponent(roomUrl)}`);
+  await hostPage.getByLabel("Your name").fill("Host");
+  await hostPage.getByRole("button", { name: "Join" }).click();
+  await guestPage.getByLabel("Your name").fill("Guest");
+  await guestPage.getByRole("button", { name: "Join" }).click();
   await expect(
     hostPage.locator("text=Peers").locator("..").locator("span.text-slate-300"),
   ).toContainText("1", { timeout: 30000 });

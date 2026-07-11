@@ -5,6 +5,7 @@
 
   import {
     MAX_CHAT_MESSAGE_LENGTH,
+    MAX_DISPLAY_NAME_LENGTH,
     parseSignalMessage,
     serializeSignalMessage,
     type SignalMessage,
@@ -42,11 +43,46 @@
   };
 
   const screenQualityPresets: ScreenQualityPreset[] = [
-    { id: "low", label: "Low - 720p30", width: 1280, height: 720, fps: 30, bitrate: 2_500_000 },
-    { id: "balanced", label: "Balanced - 1080p30", width: 1920, height: 1080, fps: 30, bitrate: 5_000_000 },
-    { id: "high", label: "High - 1080p60", width: 1920, height: 1080, fps: 60, bitrate: 8_000_000 },
-    { id: "ultra", label: "Ultra - 1440p60", width: 2560, height: 1440, fps: 60, bitrate: 14_000_000 },
-    { id: "4k", label: "4K Experimental - 4K30", width: 3840, height: 2160, fps: 30, bitrate: 20_000_000 },
+    {
+      id: "low",
+      label: "Low - 720p30",
+      width: 1280,
+      height: 720,
+      fps: 30,
+      bitrate: 2_500_000,
+    },
+    {
+      id: "balanced",
+      label: "Balanced - 1080p30",
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      bitrate: 5_000_000,
+    },
+    {
+      id: "high",
+      label: "High - 1080p60",
+      width: 1920,
+      height: 1080,
+      fps: 60,
+      bitrate: 8_000_000,
+    },
+    {
+      id: "ultra",
+      label: "Ultra - 1440p60",
+      width: 2560,
+      height: 1440,
+      fps: 60,
+      bitrate: 14_000_000,
+    },
+    {
+      id: "4k",
+      label: "4K Experimental - 4K30",
+      width: 3840,
+      height: 2160,
+      fps: 30,
+      bitrate: 20_000_000,
+    },
   ];
 
   interface GuestPeer {
@@ -64,6 +100,7 @@
     systemVolume: number;
     systemAudioSender: RTCRtpSender | null;
     pendingAudioKinds: Array<"microphone" | "system">;
+    displayName: string;
   }
 
   let guestPeers: GuestPeer[] = [];
@@ -96,9 +133,11 @@
   let screenAudioAvailable = false;
   let screenStream: MediaStream | null = null;
   let webrtcAvailable = true;
-  let isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  let isTauri =
+    typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   let isConnecting = false;
   let myPeerId = "";
+  let displayName = "";
 
   let ws: WebSocket | null = null;
   let dataChannel: RTCDataChannel | null = null;
@@ -118,8 +157,10 @@
 
   onMount(async () => {
     webrtcAvailable = typeof RTCPeerConnection !== "undefined";
-    myPeerId = sessionStorage.getItem("streaming-open-peer-id") ?? crypto.randomUUID();
+    myPeerId =
+      sessionStorage.getItem("streaming-open-peer-id") ?? crypto.randomUUID();
     sessionStorage.setItem("streaming-open-peer-id", myPeerId);
+    displayName = sessionStorage.getItem("streaming-open-display-name") ?? "";
 
     const params = new URLSearchParams(window.location.search);
     const roomUrl = params.get("room");
@@ -129,11 +170,11 @@
       joinUrl = roomUrl;
       browserHostUrl = buildBrowserRoomUrl(roomUrl);
 
-      if (role === "host" && webrtcAvailable) {
+      if (displayName && role === "host" && webrtcAvailable) {
         isConnecting = true;
         await startHost(roomUrl);
         isConnecting = false;
-      } else if (webrtcAvailable) {
+      } else if (displayName && webrtcAvailable) {
         isConnecting = true;
         await joinRoom();
         isConnecting = false;
@@ -159,10 +200,14 @@
       await invoke("set_public_app_url", { publicAppUrl });
       room = await invoke<RoomInfo>("create_room");
       joinUrl = room.signalingUrl;
-      browserHostUrl = buildBrowserRoomUrl(room.signalingUrl, room.publicAppUrl);
+      browserHostUrl = buildBrowserRoomUrl(
+        room.signalingUrl,
+        room.publicAppUrl,
+      );
       signalingStatus = await invoke<SignalingStatus>("signaling_status");
       startParticipantPolling();
-      infoMessage = "Room created. Open the browser URL in Chrome/Firefox to start streaming.";
+      infoMessage =
+        "Room created. Open the browser URL in Chrome/Firefox to start streaming.";
     } catch (error) {
       errorMessage = `Failed to create room: ${String(error)}`;
     } finally {
@@ -186,7 +231,10 @@
     }
   }
 
-  function buildBrowserRoomUrl(signalingUrl: string, appUrl: string | null = null) {
+  function buildBrowserRoomUrl(
+    signalingUrl: string,
+    appUrl: string | null = null,
+  ) {
     const url = new URL(appUrl ?? "http://localhost:1420/");
     url.searchParams.set("role", "host");
     url.searchParams.set("room", signalingUrl);
@@ -239,7 +287,7 @@
     try {
       await connectSignaling(signalingUrl);
       // A refreshed host gets a new peer ID; existing guests use this to negotiate again.
-      sendSignal({ type: "ready", peerId: myPeerId });
+      sendReadySignal();
       infoMessage = webrtcAvailable
         ? "Host ready. Waiting for guests to join."
         : "Room created (signaling only). Open the room URL in Chrome/Firefox to stream.";
@@ -256,6 +304,15 @@
 
     const params = new URLSearchParams(window.location.search);
     const role = params.get("role");
+    const normalizedName = displayName.trim();
+
+    if (!normalizedName) {
+      errorMessage = "Enter your name before joining the room.";
+      return;
+    }
+
+    displayName = normalizedName;
+    sessionStorage.setItem("streaming-open-display-name", displayName);
 
     if (role === "host") {
       errorMessage = "";
@@ -279,7 +336,7 @@
       await connectSignaling(joinUrl.trim());
 
       if (webrtcAvailable) {
-        sendSignal({ type: "ready", peerId: myPeerId });
+        sendReadySignal();
         infoMessage = "Joined the room. Connecting to participants.";
       } else {
         infoMessage =
@@ -324,7 +381,8 @@
     guest.pc.ontrack = (event) => {
       if (event.track.kind === "audio") {
         const kind = guest.pendingAudioKinds.shift() ?? "microphone";
-        const target = kind === "system" ? guest.systemAudioStream : guest.micStream;
+        const target =
+          kind === "system" ? guest.systemAudioStream : guest.micStream;
         target.addTrack(event.track);
       } else {
         guest.stream.addTrack(event.track);
@@ -350,7 +408,10 @@
   function participantName(peerId: string, isOwn: boolean) {
     if (isOwn) return "You";
     const peer = guestPeers.find((guest) => guest.id === peerId);
-    return peer?.isHost ? "Host" : `Participant ${peerId.slice(0, 8)}`;
+    return (
+      peer?.displayName ??
+      (peer?.isHost ? "Host" : `Participant ${peerId.slice(0, 8)}`)
+    );
   }
 
   function formatChatTime(sentAt: string) {
@@ -440,7 +501,7 @@
       try {
         await connectSignaling(reconnectUrl);
         reconnectAttempts = 0;
-        sendSignal({ type: "ready", peerId: myPeerId });
+        sendReadySignal();
         infoMessage = "Reconnected to the room.";
       } catch {
         scheduleReconnect();
@@ -464,6 +525,9 @@
 
       const existingPeer = guestPeers.find((guest) => guest.id === guestId);
       if (existingPeer) {
+        existingPeer.displayName =
+          message.displayName ?? existingPeer.displayName;
+        guestPeers = guestPeers;
         if (!existingPeer.isHost) return;
         // A host refresh keeps its ID and replaces the previous peer connection.
         existingPeer.pc.close();
@@ -483,6 +547,8 @@
         systemVolume: 1,
         systemAudioSender: null,
         pendingAudioKinds: [],
+        displayName:
+          message.displayName ?? `Participant ${guestId.slice(0, 8)}`,
         videoEl: null,
         micAudioEl: null,
         systemAudioEl: null,
@@ -493,7 +559,7 @@
       addCurrentSystemAudioToPeer(guest, false);
       updatePeerCount();
 
-      infoMessage = `Participant ${guestId.slice(0, 8)} joined. Connecting...`;
+      infoMessage = `${guest.displayName} joined. Connecting...`;
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -502,6 +568,7 @@
         peerId: myPeerId,
         targetPeerId: guestId,
         isHost: peerRole === "host",
+        displayName,
         description: offer,
       });
       infoMessage = `Offer sent to ${guestId.slice(0, 8)}.`;
@@ -547,6 +614,8 @@
           systemVolume: 1,
           systemAudioSender: null,
           pendingAudioKinds: [],
+          displayName:
+            message.displayName ?? `Participant ${message.peerId.slice(0, 8)}`,
           videoEl: null,
           micAudioEl: null,
           systemAudioEl: null,
@@ -555,6 +624,7 @@
         guestPeers = [...guestPeers, guest];
       } else if (message.isHost) {
         guest.isHost = true;
+        guest.displayName = message.displayName ?? guest.displayName;
         guestPeers = guestPeers;
       }
 
@@ -567,6 +637,7 @@
         type: "answer",
         peerId: myPeerId,
         targetPeerId: message.peerId,
+        displayName,
         description: answer,
       });
       infoMessage = "Answer sent. Waiting for peer connection.";
@@ -602,6 +673,10 @@
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(serializeSignalMessage(message));
     }
+  }
+
+  function sendReadySignal() {
+    sendSignal({ type: "ready", peerId: myPeerId, displayName });
   }
 
   function updatePeerCount() {
@@ -647,7 +722,9 @@
   }
 
   function toggleMic() {
-    const audioTracks = microphoneTrack ? [microphoneTrack] : localStream?.getAudioTracks() ?? [];
+    const audioTracks = microphoneTrack
+      ? [microphoneTrack]
+      : (localStream?.getAudioTracks() ?? []);
 
     if (audioTracks.length === 0) {
       micState = "No track";
@@ -754,7 +831,9 @@
 
   function sendVideoTrackToAllPeers(track: MediaStreamTrack) {
     for (const guest of guestPeers) {
-      const sender = guest.pc.getSenders().find((s) => s.track?.kind === "video");
+      const sender = guest.pc
+        .getSenders()
+        .find((s) => s.track?.kind === "video");
       if (sender) {
         sender.replaceTrack(track).catch(() => {});
       } else if (localStream) {
@@ -776,7 +855,10 @@
     }
   }
 
-  function addCurrentSystemAudioToPeer(guest: GuestPeer, renegotiateAfterAdd: boolean) {
+  function addCurrentSystemAudioToPeer(
+    guest: GuestPeer,
+    renegotiateAfterAdd: boolean,
+  ) {
     const track = screenStream?.getAudioTracks()[0];
     if (track) addSystemAudioTrackToPeer(guest, track, renegotiateAfterAdd);
   }
@@ -787,7 +869,10 @@
     renegotiateAfterAdd = true,
   ) {
     if (guest.systemAudioSender) return;
-    guest.systemAudioSender = guest.pc.addTrack(track, new MediaStream([track]));
+    guest.systemAudioSender = guest.pc.addTrack(
+      track,
+      new MediaStream([track]),
+    );
     if (renegotiateAfterAdd) renegotiate(guest);
   }
 
@@ -802,7 +887,11 @@
   }
 
   function getSelectedScreenQuality(): ScreenQualityPreset {
-    return screenQualityPresets.find((item) => item.id === selectedScreenQualityId) ?? screenQualityPresets[1];
+    return (
+      screenQualityPresets.find(
+        (item) => item.id === selectedScreenQualityId,
+      ) ?? screenQualityPresets[1]
+    );
   }
 
   async function updateScreenQuality() {
@@ -816,7 +905,10 @@
     infoMessage = `Quality updated: ${quality.width}x${quality.height}, ${quality.fps} FPS, ${formatBitrate(quality.bitrate)}.`;
   }
 
-  async function applyScreenQuality(track: MediaStreamTrack, quality: ScreenQualityPreset) {
+  async function applyScreenQuality(
+    track: MediaStreamTrack,
+    quality: ScreenQualityPreset,
+  ) {
     try {
       await track.applyConstraints({
         width: { ideal: quality.width },
@@ -829,12 +921,15 @@
 
     await Promise.all(
       guestPeers.map(async (guest) => {
-        const sender = guest.pc.getSenders().find((item) => item.track?.kind === "video");
+        const sender = guest.pc
+          .getSenders()
+          .find((item) => item.track?.kind === "video");
         if (!sender) return;
 
         try {
           const parameters = sender.getParameters();
-          parameters.encodings = parameters.encodings.length > 0 ? parameters.encodings : [{}];
+          parameters.encodings =
+            parameters.encodings.length > 0 ? parameters.encodings : [{}];
           parameters.encodings[0].maxBitrate = quality.bitrate;
           parameters.encodings[0].maxFramerate = quality.fps;
           await sender.setParameters(parameters);
@@ -858,6 +953,7 @@
         peerId: myPeerId,
         targetPeerId: guest.id,
         isHost: peerRole === "host",
+        displayName,
         description: offer,
       });
     } catch {
@@ -875,12 +971,19 @@
     if (!localStream) return;
     const tracks = localStream
       .getTracks()
-      .filter((track) => !(screenShareState === "Running" && track.kind === "audio"));
-    if (microphoneTrack && !tracks.some((track) => track.id === microphoneTrack?.id)) {
+      .filter(
+        (track) => !(screenShareState === "Running" && track.kind === "audio"),
+      );
+    if (
+      microphoneTrack &&
+      !tracks.some((track) => track.id === microphoneTrack?.id)
+    ) {
       tracks.push(microphoneTrack);
     }
     for (const track of tracks) {
-      const sender = pc.getSenders().find((item) => item.track?.kind === track.kind);
+      const sender = pc
+        .getSenders()
+        .find((item) => item.track?.kind === track.kind);
       if (sender) {
         sender.replaceTrack(track).catch(() => {});
       } else {
@@ -894,8 +997,23 @@
     for (const guest of guestPeers) {
       if (guest.videoEl) guest.videoEl.srcObject = guest.stream;
       if (guest.micAudioEl) guest.micAudioEl.srcObject = guest.micStream;
-      if (guest.systemAudioEl) guest.systemAudioEl.srcObject = guest.systemAudioStream;
+      if (guest.systemAudioEl)
+        guest.systemAudioEl.srcObject = guest.systemAudioStream;
     }
+  }
+
+  function hasActiveVideo(stream: MediaStream | null) {
+    return Boolean(
+      stream
+        ?.getVideoTracks()
+        .some((track) => track.readyState === "live" && track.enabled),
+    );
+  }
+
+  function initials(name: string) {
+    return (
+      Array.from(name.trim()).slice(0, 2).join("").toLocaleUpperCase() || "?"
+    );
   }
 
   function toggleFullscreen(el: HTMLVideoElement | null) {
@@ -907,7 +1025,11 @@
     }
   }
 
-  function setGuestVolume(guest: GuestPeer, source: "mic" | "system", volume: number) {
+  function setGuestVolume(
+    guest: GuestPeer,
+    source: "mic" | "system",
+    volume: number,
+  ) {
     if (source === "mic") {
       guest.micVolume = volume;
       if (guest.micAudioEl) guest.micAudioEl.volume = volume;
@@ -971,24 +1093,36 @@
 
 <main class="flex h-screen overflow-hidden bg-slate-950 text-slate-100">
   <!-- LEFT SIDEBAR -->
-  <aside class="flex w-72 shrink-0 flex-col border-r border-slate-800 bg-slate-900/60">
+  <aside
+    class="flex w-72 shrink-0 flex-col border-r border-slate-800 bg-slate-900/60"
+  >
     <!-- App header -->
-    <div class="flex h-12 items-center justify-between border-b border-slate-800 px-4">
+    <div
+      class="flex h-12 items-center justify-between border-b border-slate-800 px-4"
+    >
       <span class="text-sm font-semibold tracking-wide">Streaming Open</span>
-      <span class="rounded {isTauri ? 'bg-amber-400/20 text-amber-300' : 'bg-emerald-400/20 text-emerald-300'} px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider">
-        {isTauri ? 'Server' : 'Client'}
+      <span
+        class="rounded {isTauri
+          ? 'bg-amber-400/20 text-amber-300'
+          : 'bg-emerald-400/20 text-emerald-300'} px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider"
+      >
+        {isTauri ? "Server" : "Client"}
       </span>
     </div>
 
     <div class="flex-1 space-y-4 overflow-y-auto p-3">
       <!-- ALERTS -->
       {#if errorMessage}
-        <div class="rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2">
+        <div
+          class="rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2"
+        >
           <p class="text-xs text-red-200">{errorMessage}</p>
         </div>
       {/if}
       {#if infoMessage}
-        <div class="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2">
+        <div
+          class="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2"
+        >
           <p class="text-xs text-cyan-200">{infoMessage}</p>
         </div>
       {/if}
@@ -996,19 +1130,32 @@
       {#if isTauri}
         <!-- ========== TAURI SERVER VIEW ========== -->
         <div>
-          <p class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500">Signaling Server</p>
-          <label class="mb-2 block text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500" for="public-app-url">Share URL (Tailscale)</label>
+          <p
+            class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500"
+          >
+            Signaling Server
+          </p>
+          <label
+            class="mb-2 block text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500"
+            for="public-app-url">Share URL (Tailscale)</label
+          >
           <input
             id="public-app-url"
             class="mb-2 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-mono text-slate-200 outline-none placeholder:text-slate-600 focus:border-amber-500"
             bind:value={publicAppUrl}
             placeholder="https://host.tailnet.ts.net"
-            type="url" />
-          <p class="mb-3 text-[10px] leading-relaxed text-slate-500">Optional for local use. Set the HTTPS URL exposed through Tailscale before creating a room.</p>
+            type="url"
+          />
+          <p class="mb-3 text-[10px] leading-relaxed text-slate-500">
+            Optional for local use. Set the HTTPS URL exposed through Tailscale
+            before creating a room.
+          </p>
           <button
             class="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-2.5 text-sm font-semibold text-slate-950 shadow-lg shadow-amber-500/25 transition hover:bg-amber-400 disabled:opacity-60"
-            type="button" disabled={isCreatingRoom}
-            onclick={createLocalRoom}>
+            type="button"
+            disabled={isCreatingRoom}
+            onclick={createLocalRoom}
+          >
             <iconify-icon icon="mdi:plus" class="text-base"></iconify-icon>
             {isCreatingRoom ? "Creating..." : "New Room"}
           </button>
@@ -1016,10 +1163,16 @@
 
         {#if room}
           <div>
-            <p class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500">Active Room</p>
+            <p
+              class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500"
+            >
+              Active Room
+            </p>
             <button
               class="flex w-full items-center justify-center gap-2 rounded-lg bg-red-500 px-3 py-2 text-xs font-semibold text-white shadow-lg shadow-red-500/25 transition hover:bg-red-400"
-              type="button" onclick={stopCurrentRoom}>
+              type="button"
+              onclick={stopCurrentRoom}
+            >
               <iconify-icon icon="mdi:stop" class="text-sm"></iconify-icon>
               Stop Room
             </button>
@@ -1027,16 +1180,23 @@
         {/if}
 
         <div>
-          <p class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500">Server Status</p>
+          <p
+            class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500"
+          >
+            Server Status
+          </p>
           <div class="space-y-1.5 rounded-lg bg-slate-800/40 p-2.5">
             <div class="flex items-center justify-between">
               <span class="text-[11px] text-slate-500">Status</span>
               <span class="flex items-center gap-1.5 text-[11px] font-mono">
                 {#if signalingStatus?.isRunning}
-                  <span class="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                  <span
+                    class="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400"
+                  ></span>
                   <span class="text-emerald-300">Running</span>
                 {:else}
-                  <span class="inline-block h-1.5 w-1.5 rounded-full bg-red-400"></span>
+                  <span class="inline-block h-1.5 w-1.5 rounded-full bg-red-400"
+                  ></span>
                   <span class="text-red-300">Stopped</span>
                 {/if}
               </span>
@@ -1044,60 +1204,109 @@
             {#if signalingStatus?.localIp}
               <div class="flex items-center justify-between">
                 <span class="text-[11px] text-slate-500">Port</span>
-                <span class="text-[11px] font-mono text-slate-300">{signalingStatus.port}</span>
+                <span class="text-[11px] font-mono text-slate-300"
+                  >{signalingStatus.port}</span
+                >
               </div>
               <div class="flex items-center justify-between">
                 <span class="text-[11px] text-slate-500">Address</span>
-                <span class="text-[11px] font-mono text-slate-300">{signalingStatus.localIp}</span>
+                <span class="text-[11px] font-mono text-slate-300"
+                  >{signalingStatus.localIp}</span
+                >
               </div>
             {/if}
           </div>
         </div>
-
       {:else}
         <!-- ========== BROWSER CLIENT VIEW ========== -->
         <div>
-          <p class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500">Connection</p>
+          <p
+            class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500"
+          >
+            Connection
+          </p>
+          <label
+            class="mb-2 block text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500"
+            for="display-name">Your name</label
+          >
+          <input
+            id="display-name"
+            class="mb-2 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 outline-none placeholder:text-slate-600 focus:border-cyan-500"
+            bind:value={displayName}
+            maxlength={MAX_DISPLAY_NAME_LENGTH}
+            placeholder="How should people see you?"
+            type="text"
+          />
           <div class="flex gap-2">
             <input
               id="join-url"
               class="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-mono text-slate-200 outline-none placeholder:text-slate-600 focus:border-cyan-500"
               bind:value={joinUrl}
               placeholder="ws://192.168.15.8:17777/ws/..."
-              type="text" />
+              type="text"
+            />
             <button
               class="flex-shrink-0 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-slate-500 transition hover:text-cyan-400 hover:border-slate-600"
-              type="button" onclick={() => copyText(joinUrl)}
-              title="Copy">
-              <iconify-icon icon={copied ? "mdi:check" : "mdi:content-copy"} class="text-xs"></iconify-icon>
+              type="button"
+              onclick={() => copyText(joinUrl)}
+              title="Copy"
+            >
+              <iconify-icon
+                icon={copied ? "mdi:check" : "mdi:content-copy"}
+                class="text-xs"
+              ></iconify-icon>
             </button>
           </div>
           <button
-              class="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 shadow-lg shadow-cyan-500/25 transition hover:bg-cyan-400"
-              type="button" onclick={joinRoom}>
-              <iconify-icon icon="mdi:login" class="text-sm"></iconify-icon>
-              Join
-            </button>
+            class="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 shadow-lg shadow-cyan-500/25 transition hover:bg-cyan-400"
+            type="button"
+            onclick={joinRoom}
+          >
+            <iconify-icon icon="mdi:login" class="text-sm"></iconify-icon>
+            Join
+          </button>
         </div>
 
         <div>
-          <p class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500">Status</p>
+          <p
+            class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500"
+          >
+            Status
+          </p>
           <div class="space-y-1.5 rounded-lg bg-slate-800/40 p-2.5">
             <div class="flex items-center justify-between">
               <span class="text-[11px] text-slate-500">Role</span>
-              <span class="text-[11px] font-mono text-slate-300 capitalize">{peerRole ?? "none"}</span>
+              <span class="text-[11px] font-mono text-slate-300 capitalize"
+                >{peerRole ?? "none"}</span
+              >
             </div>
             <div class="flex items-center justify-between">
               <span class="text-[11px] text-slate-500">Socket</span>
-              <span class="flex items-center gap-1.5 text-[11px] font-mono text-slate-300">
-                <span class="inline-block h-1.5 w-1.5 rounded-full {signalingConnectionState === 'Connected' ? 'bg-emerald-400' : signalingConnectionState === 'Error' ? 'bg-red-400' : 'bg-amber-400'}"></span>
+              <span
+                class="flex items-center gap-1.5 text-[11px] font-mono text-slate-300"
+              >
+                <span
+                  class="inline-block h-1.5 w-1.5 rounded-full {signalingConnectionState ===
+                  'Connected'
+                    ? 'bg-emerald-400'
+                    : signalingConnectionState === 'Error'
+                      ? 'bg-red-400'
+                      : 'bg-amber-400'}"
+                ></span>
                 {signalingConnectionState}
               </span>
             </div>
             <div class="flex items-center justify-between">
               <span class="text-[11px] text-slate-500">Peers</span>
-              <span class="flex items-center gap-1.5 text-[11px] font-mono text-slate-300">
-                <span class="inline-block h-1.5 w-1.5 rounded-full {guestPeers.length > 0 ? 'bg-emerald-400' : 'bg-amber-400'}"></span>
+              <span
+                class="flex items-center gap-1.5 text-[11px] font-mono text-slate-300"
+              >
+                <span
+                  class="inline-block h-1.5 w-1.5 rounded-full {guestPeers.length >
+                  0
+                    ? 'bg-emerald-400'
+                    : 'bg-amber-400'}"
+                ></span>
                 {guestPeers.length}
               </span>
             </div>
@@ -1106,40 +1315,92 @@
 
         {#if peerRole}
           <div>
-            <p class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500">Devices</p>
+            <p
+              class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500"
+            >
+              Devices
+            </p>
             <div class="flex gap-2">
               <button
-                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {cameraState === 'Running' ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-emerald-500 hover:text-emerald-300"
-                type="button" onclick={toggleCamera} title={cameraState === "Running" ? "Stop camera" : "Start camera"}>
-                <iconify-icon icon={cameraState === "Running" ? "mdi:video-off" : "mdi:video"} class="text-sm"></iconify-icon>
+                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {cameraState ===
+                'Running'
+                  ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+                  : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-emerald-500 hover:text-emerald-300"
+                type="button"
+                onclick={toggleCamera}
+                title={cameraState === "Running"
+                  ? "Stop camera"
+                  : "Start camera"}
+              >
+                <iconify-icon
+                  icon={cameraState === "Running"
+                    ? "mdi:video-off"
+                    : "mdi:video"}
+                  class="text-sm"
+                ></iconify-icon>
               </button>
               <button
-                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {micState === 'Muted' ? 'border-red-500/50 bg-red-500/10 text-red-300' : micState === 'Active' ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-cyan-500 hover:text-cyan-300"
-                type="button" onclick={toggleMic} title={micState === "Muted" ? "Unmute" : "Mute"}>
-                <iconify-icon icon={micState === "Muted" ? "mdi:microphone-off" : "mdi:microphone"} class="text-sm"></iconify-icon>
+                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {micState ===
+                'Muted'
+                  ? 'border-red-500/50 bg-red-500/10 text-red-300'
+                  : micState === 'Active'
+                    ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+                    : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-cyan-500 hover:text-cyan-300"
+                type="button"
+                onclick={toggleMic}
+                title={micState === "Muted" ? "Unmute" : "Mute"}
+              >
+                <iconify-icon
+                  icon={micState === "Muted"
+                    ? "mdi:microphone-off"
+                    : "mdi:microphone"}
+                  class="text-sm"
+                ></iconify-icon>
               </button>
               <button
-                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {screenShareState === 'Running' ? 'border-purple-500/50 bg-purple-500/10 text-purple-300' : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-purple-500 hover:text-purple-300"
-                type="button" onclick={screenShareState === "Running" ? stopScreenShare : startScreenShare}
-                title={screenShareState === "Running" ? "Stop sharing" : "Share screen"}>
-                <iconify-icon icon={screenShareState === "Running" ? "mdi:monitor-off" : "mdi:monitor-share"} class="text-sm"></iconify-icon>
+                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {screenShareState ===
+                'Running'
+                  ? 'border-purple-500/50 bg-purple-500/10 text-purple-300'
+                  : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-purple-500 hover:text-purple-300"
+                type="button"
+                onclick={screenShareState === "Running"
+                  ? stopScreenShare
+                  : startScreenShare}
+                title={screenShareState === "Running"
+                  ? "Stop sharing"
+                  : "Share screen"}
+              >
+                <iconify-icon
+                  icon={screenShareState === "Running"
+                    ? "mdi:monitor-off"
+                    : "mdi:monitor-share"}
+                  class="text-sm"
+                ></iconify-icon>
               </button>
             </div>
             {#if screenShareState === "Running"}
               <div class="mt-3 space-y-2 rounded-lg bg-slate-800/40 p-2.5">
                 <div class="flex items-center justify-between">
-                  <p class="text-[10px] font-semibold uppercase tracking-[0.15em] text-slate-500">Screen quality</p>
+                  <p
+                    class="text-[10px] font-semibold uppercase tracking-[0.15em] text-slate-500"
+                  >
+                    Screen quality
+                  </p>
                   <span class="text-[10px] text-purple-300">Live</span>
                 </div>
                 <select
                   class="w-full rounded border border-slate-700 bg-slate-800 px-2 py-1.5 text-[11px] text-slate-200 outline-none focus:border-purple-500"
                   bind:value={selectedScreenQualityId}
-                  onchange={updateScreenQuality}>
+                  onchange={updateScreenQuality}
+                >
                   {#each screenQualityPresets as preset}
                     <option value={preset.id}>{preset.label}</option>
                   {/each}
                 </select>
-                <p class="text-[10px] leading-relaxed text-slate-500">Resolution and FPS are capture hints; bitrate is applied to video senders when supported.</p>
+                <p class="text-[10px] leading-relaxed text-slate-500">
+                  Resolution and FPS are capture hints; bitrate is applied to
+                  video senders when supported.
+                </p>
               </div>
             {/if}
           </div>
@@ -1148,16 +1409,37 @@
     </div>
 
     <!-- Bottom user area -->
-    <div class="flex items-center gap-2.5 border-t border-slate-800 bg-slate-900/80 px-3 py-2">
-      <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full {isTauri ? 'bg-amber-500/30' : peerRole === 'host' ? 'bg-emerald-500/30' : peerRole === 'guest' ? 'bg-cyan-500/30' : 'bg-slate-700'}">
+    <div
+      class="flex items-center gap-2.5 border-t border-slate-800 bg-slate-900/80 px-3 py-2"
+    >
+      <div
+        class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full {isTauri
+          ? 'bg-amber-500/30'
+          : peerRole === 'host'
+            ? 'bg-emerald-500/30'
+            : peerRole === 'guest'
+              ? 'bg-cyan-500/30'
+              : 'bg-slate-700'}"
+      >
         <iconify-icon
-          icon={isTauri ? "mdi:server" : peerRole === "host" ? "mdi:broadcast" : peerRole === "guest" ? "mdi:account" : "mdi:help"}
-          class="text-sm {isTauri ? 'text-amber-300' : peerRole ? 'text-emerald-300' : 'text-slate-500'}">
+          icon={isTauri
+            ? "mdi:server"
+            : peerRole === "host"
+              ? "mdi:broadcast"
+              : peerRole === "guest"
+                ? "mdi:account"
+                : "mdi:help"}
+          class="text-sm {isTauri
+            ? 'text-amber-300'
+            : peerRole
+              ? 'text-emerald-300'
+              : 'text-slate-500'}"
+        >
         </iconify-icon>
       </div>
       <div class="min-w-0 flex-1">
         <p class="truncate text-xs font-medium">
-          {isTauri ? "Signaling server" : peerRole === "host" ? "You are the host" : peerRole === "guest" ? "You are a guest" : "Not connected"}
+          {isTauri ? "Signaling server" : displayName || "Not connected"}
         </p>
         <p class="truncate text-[10px] text-slate-500">
           {isTauri
@@ -1167,7 +1449,7 @@
             : room?.roomId
               ? room.roomId.slice(0, 12) + "..."
               : peerRole === "host"
-                ? `${guestPeers.filter(g => g.connected).length} guest(s)`
+                ? `${guestPeers.filter((g) => g.connected).length} guest(s)`
                 : "No room"}
         </p>
       </div>
@@ -1176,7 +1458,9 @@
 
   <!-- MAIN CONTENT -->
   <div class="flex flex-1 flex-col overflow-hidden">
-    <div class="flex h-12 shrink-0 items-center gap-3 border-b border-slate-800 bg-slate-900/40 px-4">
+    <div
+      class="flex h-12 shrink-0 items-center gap-3 border-b border-slate-800 bg-slate-900/40 px-4"
+    >
       <h2 class="text-sm font-semibold text-slate-200">
         {#if isTauri}
           Signaling Server
@@ -1192,15 +1476,25 @@
       {#if !isTauri && peerRole}
         <button
           class="relative rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-400 transition hover:border-slate-500 hover:text-white"
-          type="button" onclick={toggleChat} aria-label="Toggle chat" title="Chat">
-          <iconify-icon icon="mdi:message-text-outline" class="text-sm"></iconify-icon>
+          type="button"
+          onclick={toggleChat}
+          aria-label="Toggle chat"
+          title="Chat"
+        >
+          <iconify-icon icon="mdi:message-text-outline" class="text-sm"
+          ></iconify-icon>
           {#if unreadChatMessages > 0}
-            <span class="absolute -right-1 -top-1 min-w-4 rounded-full bg-cyan-400 px-1 text-[9px] font-bold leading-4 text-slate-950">{unreadChatMessages > 99 ? "99+" : unreadChatMessages}</span>
+            <span
+              class="absolute -right-1 -top-1 min-w-4 rounded-full bg-cyan-400 px-1 text-[9px] font-bold leading-4 text-slate-950"
+              >{unreadChatMessages > 99 ? "99+" : unreadChatMessages}</span
+            >
           {/if}
         </button>
         <button
           class="flex items-center gap-1.5 rounded-lg bg-red-500/20 px-3 py-1 text-xs font-medium text-red-400 transition hover:bg-red-500/30"
-          type="button" onclick={closeConnection}>
+          type="button"
+          onclick={closeConnection}
+        >
           <iconify-icon icon="mdi:phone-hangup" class="text-sm"></iconify-icon>
           Leave
         </button>
@@ -1213,69 +1507,182 @@
           <div class="mx-auto flex h-full w-full max-w-5xl flex-col gap-5 py-4">
             <div class="flex items-center justify-between">
               <div>
-                <p class="text-[11px] font-semibold uppercase tracking-[0.15em] text-amber-300">Room active</p>
-                <h3 class="mt-1 text-2xl font-semibold text-slate-100">Connection details</h3>
+                <p
+                  class="text-[11px] font-semibold uppercase tracking-[0.15em] text-amber-300"
+                >
+                  Room active
+                </p>
+                <h3 class="mt-1 text-2xl font-semibold text-slate-100">
+                  Connection details
+                </h3>
               </div>
-              <span class="rounded-full bg-emerald-400/10 px-3 py-1 text-xs font-medium text-emerald-300">{roomParticipants.length} connected</span>
+              <span
+                class="rounded-full bg-emerald-400/10 px-3 py-1 text-xs font-medium text-emerald-300"
+                >{roomParticipants.length} connected</span
+              >
             </div>
 
             <div class="grid gap-4 lg:grid-cols-2">
-              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                <p class="text-[10px] uppercase tracking-wider text-slate-500">Room ID</p>
-                <p class="mt-2 break-all font-mono text-sm text-slate-300">{room.roomId}</p>
+              <div
+                class="rounded-xl border border-slate-800 bg-slate-900/60 p-4"
+              >
+                <p class="text-[10px] uppercase tracking-wider text-slate-500">
+                  Room ID
+                </p>
+                <p class="mt-2 break-all font-mono text-sm text-slate-300">
+                  {room.roomId}
+                </p>
               </div>
-              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                <p class="text-[10px] uppercase tracking-wider text-slate-500">Connected participants</p>
+              <div
+                class="rounded-xl border border-slate-800 bg-slate-900/60 p-4"
+              >
+                <p class="text-[10px] uppercase tracking-wider text-slate-500">
+                  Connected participants
+                </p>
                 {#if roomParticipants.length}
                   <div class="mt-3 space-y-2">
                     {#each roomParticipants as participant}
-                      <div class="flex items-center gap-2 text-sm text-slate-200"><span class="h-2 w-2 rounded-full bg-emerald-400"></span>{participant}</div>
+                      <div
+                        class="flex items-center gap-2 text-sm text-slate-200"
+                      >
+                        <span class="h-2 w-2 rounded-full bg-emerald-400"
+                        ></span>{participant}
+                      </div>
                     {/each}
                   </div>
                 {:else}
-                  <p class="mt-2 text-sm text-slate-500">Waiting for participants to join.</p>
+                  <p class="mt-2 text-sm text-slate-500">
+                    Waiting for participants to join.
+                  </p>
                 {/if}
               </div>
             </div>
 
             <div class="grid gap-4 lg:grid-cols-3">
-              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                <div class="flex items-center justify-between"><p class="text-[10px] uppercase tracking-wider text-slate-500">Signaling URL</p><button type="button" onclick={() => copyText(room!.signalingUrl)} title="Copy"><iconify-icon icon={copied ? "mdi:check" : "mdi:content-copy"}></iconify-icon></button></div>
-                <p class="mt-3 break-all font-mono text-xs text-emerald-300">{room.signalingUrl}</p>
+              <div
+                class="rounded-xl border border-slate-800 bg-slate-900/60 p-4"
+              >
+                <div class="flex items-center justify-between">
+                  <p
+                    class="text-[10px] uppercase tracking-wider text-slate-500"
+                  >
+                    Signaling URL
+                  </p>
+                  <button
+                    type="button"
+                    onclick={() => copyText(room!.signalingUrl)}
+                    title="Copy"
+                    ><iconify-icon
+                      icon={copied ? "mdi:check" : "mdi:content-copy"}
+                    ></iconify-icon></button
+                  >
+                </div>
+                <p class="mt-3 break-all font-mono text-xs text-emerald-300">
+                  {room.signalingUrl}
+                </p>
               </div>
-              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                <div class="flex items-center justify-between"><p class="text-[10px] uppercase tracking-wider text-slate-500">Host URL</p><button type="button" onclick={() => copyText(browserHostUrl)} title="Copy"><iconify-icon icon={copied ? "mdi:check" : "mdi:content-copy"}></iconify-icon></button></div>
-                <p class="mt-3 break-all font-mono text-xs text-cyan-300">{browserHostUrl}</p>
+              <div
+                class="rounded-xl border border-slate-800 bg-slate-900/60 p-4"
+              >
+                <div class="flex items-center justify-between">
+                  <p
+                    class="text-[10px] uppercase tracking-wider text-slate-500"
+                  >
+                    Host URL
+                  </p>
+                  <button
+                    type="button"
+                    onclick={() => copyText(browserHostUrl)}
+                    title="Copy"
+                    ><iconify-icon
+                      icon={copied ? "mdi:check" : "mdi:content-copy"}
+                    ></iconify-icon></button
+                  >
+                </div>
+                <p class="mt-3 break-all font-mono text-xs text-cyan-300">
+                  {browserHostUrl}
+                </p>
               </div>
-              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                <div class="flex items-center justify-between"><p class="text-[10px] uppercase tracking-wider text-slate-500">Participant URL</p><button type="button" onclick={() => copyText(buildGuestUrl(room!.signalingUrl, room!.publicAppUrl))} title="Copy"><iconify-icon icon={copied ? "mdi:check" : "mdi:content-copy"}></iconify-icon></button></div>
-                <p class="mt-3 break-all font-mono text-xs text-purple-300">{buildGuestUrl(room.signalingUrl, room.publicAppUrl)}</p>
+              <div
+                class="rounded-xl border border-slate-800 bg-slate-900/60 p-4"
+              >
+                <div class="flex items-center justify-between">
+                  <p
+                    class="text-[10px] uppercase tracking-wider text-slate-500"
+                  >
+                    Participant URL
+                  </p>
+                  <button
+                    type="button"
+                    onclick={() =>
+                      copyText(
+                        buildGuestUrl(room!.signalingUrl, room!.publicAppUrl),
+                      )}
+                    title="Copy"
+                    ><iconify-icon
+                      icon={copied ? "mdi:check" : "mdi:content-copy"}
+                    ></iconify-icon></button
+                  >
+                </div>
+                <p class="mt-3 break-all font-mono text-xs text-purple-300">
+                  {buildGuestUrl(room.signalingUrl, room.publicAppUrl)}
+                </p>
               </div>
             </div>
           </div>
         {:else}
           <!-- TAURI: Server instructions -->
-          <div class="flex h-full flex-col items-center justify-center px-4 text-center">
-          <div class="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-amber-500/10">
-            <iconify-icon icon="mdi:server" class="text-4xl text-amber-400"></iconify-icon>
+          <div
+            class="flex h-full flex-col items-center justify-center px-4 text-center"
+          >
+            <div
+              class="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-amber-500/10"
+            >
+              <iconify-icon icon="mdi:server" class="text-4xl text-amber-400"
+              ></iconify-icon>
+            </div>
+            <h3 class="text-xl font-semibold text-slate-200">
+              Signaling server control
+            </h3>
+            <p class="mt-2 max-w-md text-sm text-slate-400">
+              This app runs the room signaling server. Create a room, then open
+              the stream in a browser.
+            </p>
+            <div class="mt-6 space-y-2 text-xs text-slate-500">
+              <p>
+                <span class="mr-2 font-bold text-slate-400">1.</span>Click
+                <span class="font-semibold text-amber-300">New Room</span> in the
+                sidebar
+              </p>
+              <p>
+                <span class="mr-2 font-bold text-slate-400">2.</span>Copy the
+                <span class="font-semibold text-cyan-300">browser URL</span> and open
+                in Chrome/Firefox
+              </p>
+              <p>
+                <span class="mr-2 font-bold text-slate-400">3.</span>Share the
+                <span class="font-semibold text-emerald-300">signaling URL</span
+                > with guests
+              </p>
+              <p>
+                <span class="mr-2 font-bold text-slate-400">4.</span>Close this
+                app when done. Rooms are ephemeral.
+              </p>
+            </div>
           </div>
-          <h3 class="text-xl font-semibold text-slate-200">Signaling server control</h3>
-          <p class="mt-2 max-w-md text-sm text-slate-400">
-            This app runs the room signaling server. Create a room, then open the stream in a browser.
-          </p>
-          <div class="mt-6 space-y-2 text-xs text-slate-500">
-            <p><span class="mr-2 font-bold text-slate-400">1.</span>Click <span class="font-semibold text-amber-300">New Room</span> in the sidebar</p>
-            <p><span class="mr-2 font-bold text-slate-400">2.</span>Copy the <span class="font-semibold text-cyan-300">browser URL</span> and open in Chrome/Firefox</p>
-            <p><span class="mr-2 font-bold text-slate-400">3.</span>Share the <span class="font-semibold text-emerald-300">signaling URL</span> with guests</p>
-            <p><span class="mr-2 font-bold text-slate-400">4.</span>Close this app when done. Rooms are ephemeral.</p>
-          </div>
-        </div>
         {/if}
       {:else if isConnecting}
         <!-- BROWSER: Connecting -->
-        <div class="flex h-full flex-col items-center justify-center px-4 text-center">
-          <div class="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-cyan-500/10">
-            <iconify-icon icon="mdi:sync" class="animate-spin text-4xl text-cyan-400"></iconify-icon>
+        <div
+          class="flex h-full flex-col items-center justify-center px-4 text-center"
+        >
+          <div
+            class="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-cyan-500/10"
+          >
+            <iconify-icon
+              icon="mdi:sync"
+              class="animate-spin text-4xl text-cyan-400"
+            ></iconify-icon>
           </div>
           <h3 class="text-xl font-semibold text-slate-200">Connecting...</h3>
           <p class="mt-2 max-w-md text-sm text-slate-400">
@@ -1286,91 +1693,234 @@
         <!-- BROWSER: Call active -->
         <div class="flex h-full min-h-0 gap-3">
           <div class={`video-grid ${videoGridClass}`}>
-            <div class="video-tile relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group">
-              <div class="absolute left-3 top-3 z-10 flex items-center gap-2 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur">
+            <div
+              class="video-tile relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group"
+            >
+              <div
+                class="absolute left-3 top-3 z-10 flex items-center gap-2 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur"
+              >
                 <span class="text-xs text-slate-300">You</span>
-                <span class="rounded {screenShareState === 'Running' ? 'bg-purple-500/30 text-purple-300' : cameraState === 'Running' ? 'bg-emerald-500/30 text-emerald-300' : 'bg-slate-700 text-slate-400'} px-1.5 py-0.5 text-[10px]">{screenShareState === 'Running' ? screenAudioAvailable ? 'Screen + audio' : 'Screen' : cameraState}</span>
+                <span
+                  class="rounded {screenShareState === 'Running'
+                    ? 'bg-purple-500/30 text-purple-300'
+                    : cameraState === 'Running'
+                      ? 'bg-emerald-500/30 text-emerald-300'
+                      : 'bg-slate-700 text-slate-400'} px-1.5 py-0.5 text-[10px]"
+                  >{screenShareState === "Running"
+                    ? screenAudioAvailable
+                      ? "Screen + audio"
+                      : "Screen"
+                    : cameraState}</span
+                >
               </div>
-              <div class="absolute right-3 top-3 z-10 flex gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+              <div
+                class="absolute right-3 top-3 z-10 flex gap-1.5 opacity-0 transition-opacity group-hover:opacity-100"
+              >
                 <button
                   class="rounded-lg bg-slate-950/70 p-2 text-slate-300 backdrop-blur transition hover:text-white"
-                  type="button" onclick={() => toggleFullscreen(localVideo)}
-                  title="Fullscreen">
-                  <iconify-icon icon="mdi:fullscreen" class="text-sm"></iconify-icon>
+                  type="button"
+                  onclick={() => toggleFullscreen(localVideo)}
+                  title="Fullscreen"
+                >
+                  <iconify-icon icon="mdi:fullscreen" class="text-sm"
+                  ></iconify-icon>
                 </button>
               </div>
-              <video class="h-full w-full object-cover" autoplay bind:this={localVideo} muted playsinline></video>
+              {#if !hasActiveVideo(localStream)}
+                <div
+                  class="absolute inset-0 flex items-center justify-center"
+                  aria-label={`${displayName} avatar`}
+                >
+                  <span
+                    class="flex h-20 w-20 items-center justify-center rounded-full bg-cyan-500/20 text-2xl font-semibold tracking-wide text-cyan-200"
+                    >{initials(displayName)}</span
+                  >
+                </div>
+              {/if}
+              <video
+                class="h-full w-full object-cover"
+                autoplay
+                bind:this={localVideo}
+                muted
+                playsinline
+              ></video>
             </div>
             {#each guestPeers as guest (guest.id)}
-              <div class="video-tile relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group">
-                <div class="absolute left-3 top-3 z-10 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur">
+              <div
+                class="video-tile relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group"
+              >
+                <div
+                  class="absolute left-3 top-3 z-10 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur"
+                >
                   <span class="text-xs text-slate-300">
-                    {guest.isHost ? "Host" : `Participant ${guest.id.slice(0, 8)}`}
+                    {guest.displayName}
                   </span>
                 </div>
-                <div class="absolute right-3 top-3 z-10 flex gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+                <div
+                  class="absolute right-3 top-3 z-10 flex gap-1.5 opacity-0 transition-opacity group-hover:opacity-100"
+                >
                   <button
                     class="rounded-lg bg-slate-950/70 p-2 text-slate-300 backdrop-blur transition hover:text-white"
-                    type="button" onclick={() => toggleFullscreen(guest.videoEl)}
-                    title="Fullscreen">
-                    <iconify-icon icon="mdi:fullscreen" class="text-sm"></iconify-icon>
+                    type="button"
+                    onclick={() => toggleFullscreen(guest.videoEl)}
+                    title="Fullscreen"
+                  >
+                    <iconify-icon icon="mdi:fullscreen" class="text-sm"
+                    ></iconify-icon>
                   </button>
                 </div>
-                <div class="absolute bottom-3 right-3 z-10 flex gap-2 rounded-lg bg-slate-950/70 px-2 py-2 {guest.systemAudioStream.getAudioTracks().length > 0 ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} backdrop-blur transition-opacity">
+                <div
+                  class="absolute bottom-3 right-3 z-10 flex gap-2 rounded-lg bg-slate-950/70 px-2 py-2 {guest.systemAudioStream.getAudioTracks()
+                    .length > 0
+                    ? 'opacity-100'
+                    : 'opacity-0 group-hover:opacity-100'} backdrop-blur transition-opacity"
+                >
                   <div class="flex flex-col items-center gap-2">
-                  <input
-                    class="volume-slider cursor-pointer accent-cyan-400"
-                    type="range" min="0" max="1" step="0.01"
-                    value={guest.micVolume}
-                    oninput={(e) => setGuestVolume(guest, "mic", parseFloat(e.currentTarget.value))}
-                  />
-                  <iconify-icon icon={guest.micVolume === 0 ? "mdi:microphone-off" : "mdi:microphone"} class="text-lg text-slate-300"></iconify-icon>
+                    <input
+                      class="volume-slider cursor-pointer accent-cyan-400"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={guest.micVolume}
+                      oninput={(e) =>
+                        setGuestVolume(
+                          guest,
+                          "mic",
+                          parseFloat(e.currentTarget.value),
+                        )}
+                    />
+                    <iconify-icon
+                      icon={guest.micVolume === 0
+                        ? "mdi:microphone-off"
+                        : "mdi:microphone"}
+                      class="text-lg text-slate-300"
+                    ></iconify-icon>
                   </div>
                   {#if guest.systemAudioStream.getAudioTracks().length > 0}
-                    <div class="flex flex-col items-center gap-2 border-l border-slate-700 pl-2">
+                    <div
+                      class="flex flex-col items-center gap-2 border-l border-slate-700 pl-2"
+                    >
                       <input
                         class="volume-slider cursor-pointer accent-purple-400"
-                        type="range" min="0" max="1" step="0.01"
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
                         value={guest.systemVolume}
-                        oninput={(e) => setGuestVolume(guest, "system", parseFloat(e.currentTarget.value))}
+                        oninput={(e) =>
+                          setGuestVolume(
+                            guest,
+                            "system",
+                            parseFloat(e.currentTarget.value),
+                          )}
                       />
-                      <iconify-icon icon={guest.systemVolume === 0 ? "mdi:volume-off" : "mdi:volume-high"} class="text-lg text-purple-300"></iconify-icon>
+                      <iconify-icon
+                        icon={guest.systemVolume === 0
+                          ? "mdi:volume-off"
+                          : "mdi:volume-high"}
+                        class="text-lg text-purple-300"
+                      ></iconify-icon>
                     </div>
                   {/if}
                 </div>
-                <video class="h-full w-full object-cover" autoplay bind:this={guest.videoEl} muted playsinline></video>
+                {#if !hasActiveVideo(guest.stream)}
+                  <div
+                    class="absolute inset-0 flex items-center justify-center"
+                    aria-label={`${guest.displayName} avatar`}
+                  >
+                    <span
+                      class="flex h-20 w-20 items-center justify-center rounded-full bg-purple-500/20 text-2xl font-semibold tracking-wide text-purple-200"
+                      >{initials(guest.displayName)}</span
+                    >
+                  </div>
+                {/if}
+                <video
+                  class="h-full w-full object-cover"
+                  autoplay
+                  bind:this={guest.videoEl}
+                  muted
+                  playsinline
+                ></video>
                 <audio bind:this={guest.micAudioEl} autoplay></audio>
                 <audio bind:this={guest.systemAudioEl} autoplay></audio>
               </div>
             {/each}
           </div>
           {#if isChatOpen}
-            <section class="flex w-80 shrink-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/80" aria-label="Room chat">
-              <header class="flex items-center justify-between border-b border-slate-800 px-3 py-2.5">
+            <section
+              class="flex w-80 shrink-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/80"
+              aria-label="Room chat"
+            >
+              <header
+                class="flex items-center justify-between border-b border-slate-800 px-3 py-2.5"
+              >
                 <div class="flex items-center gap-2">
-                  <iconify-icon icon="mdi:message-text-outline" class="text-cyan-300"></iconify-icon>
-                  <h3 class="text-sm font-semibold text-slate-200">Room chat</h3>
+                  <iconify-icon
+                    icon="mdi:message-text-outline"
+                    class="text-cyan-300"
+                  ></iconify-icon>
+                  <h3 class="text-sm font-semibold text-slate-200">
+                    Room chat
+                  </h3>
                 </div>
-                <button class="rounded p-1 text-slate-400 transition hover:bg-slate-800 hover:text-white" type="button" onclick={toggleChat} aria-label="Close chat" title="Close chat">
+                <button
+                  class="rounded p-1 text-slate-400 transition hover:bg-slate-800 hover:text-white"
+                  type="button"
+                  onclick={toggleChat}
+                  aria-label="Close chat"
+                  title="Close chat"
+                >
                   <iconify-icon icon="mdi:close"></iconify-icon>
                 </button>
               </header>
-              <div class="flex-1 space-y-3 overflow-y-auto p-3" bind:this={chatHistory} aria-live="polite">
+              <div
+                class="flex-1 space-y-3 overflow-y-auto p-3"
+                bind:this={chatHistory}
+                aria-live="polite"
+              >
                 {#if chatMessages.length === 0}
-                  <p class="pt-5 text-center text-xs text-slate-500">No messages yet. Say hello to the room.</p>
+                  <p class="pt-5 text-center text-xs text-slate-500">
+                    No messages yet. Say hello to the room.
+                  </p>
                 {:else}
                   {#each chatMessages as message (message.id)}
-                    <article class="flex flex-col {message.isOwn ? 'items-end' : 'items-start'}">
-                      <div class="mb-1 flex max-w-full items-center gap-1.5 text-[10px] text-slate-500">
-                        <span>{participantName(message.peerId, message.isOwn)}</span>
-                        <time datetime={message.sentAt}>{formatChatTime(message.sentAt)}</time>
+                    <article
+                      class="flex flex-col {message.isOwn
+                        ? 'items-end'
+                        : 'items-start'}"
+                    >
+                      <div
+                        class="mb-1 flex max-w-full items-center gap-1.5 text-[10px] text-slate-500"
+                      >
+                        <span
+                          >{participantName(
+                            message.peerId,
+                            message.isOwn,
+                          )}</span
+                        >
+                        <time datetime={message.sentAt}
+                          >{formatChatTime(message.sentAt)}</time
+                        >
                       </div>
-                      <p class="max-w-full whitespace-pre-wrap break-words rounded-xl px-3 py-2 text-xs leading-relaxed {message.isOwn ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-200'}">{message.text}</p>
+                      <p
+                        class="max-w-full whitespace-pre-wrap break-words rounded-xl px-3 py-2 text-xs leading-relaxed {message.isOwn
+                          ? 'bg-cyan-500 text-slate-950'
+                          : 'bg-slate-800 text-slate-200'}"
+                      >
+                        {message.text}
+                      </p>
                     </article>
                   {/each}
                 {/if}
               </div>
-              <form class="border-t border-slate-800 p-3" onsubmit={(event) => { event.preventDefault(); sendChatMessage(); }}>
+              <form
+                class="border-t border-slate-800 p-3"
+                onsubmit={(event) => {
+                  event.preventDefault();
+                  sendChatMessage();
+                }}
+              >
                 <textarea
                   class="min-h-18 w-full resize-none rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-500 disabled:opacity-60"
                   bind:this={chatInput}
@@ -1379,11 +1929,22 @@
                   onkeydown={handleChatKeydown}
                   placeholder="Message the room"
                   aria-label="Chat message"
-                  disabled={signalingConnectionState !== "Connected"}></textarea>
+                  disabled={signalingConnectionState !== "Connected"}
+                ></textarea>
                 <div class="mt-2 flex items-center justify-between gap-2">
-                  <span class="text-[10px] text-slate-500">{chatDraft.length}/{MAX_CHAT_MESSAGE_LENGTH}</span>
-                  <button class="rounded-lg bg-cyan-500 p-1.5 text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={!chatDraft.trim() || signalingConnectionState !== "Connected"} aria-label="Send message" title="Send message">
-                    <iconify-icon icon="mdi:send" class="text-sm"></iconify-icon>
+                  <span class="text-[10px] text-slate-500"
+                    >{chatDraft.length}/{MAX_CHAT_MESSAGE_LENGTH}</span
+                  >
+                  <button
+                    class="rounded-lg bg-cyan-500 p-1.5 text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50"
+                    type="submit"
+                    disabled={!chatDraft.trim() ||
+                      signalingConnectionState !== "Connected"}
+                    aria-label="Send message"
+                    title="Send message"
+                  >
+                    <iconify-icon icon="mdi:send" class="text-sm"
+                    ></iconify-icon>
                   </button>
                 </div>
               </form>
@@ -1392,18 +1953,40 @@
         </div>
       {:else}
         <!-- BROWSER: No call -->
-        <div class="flex h-full flex-col items-center justify-center px-4 text-center">
-          <div class="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-emerald-500/10">
-            <iconify-icon icon="mdi:video" class="text-4xl text-emerald-400"></iconify-icon>
+        <div
+          class="flex h-full flex-col items-center justify-center px-4 text-center"
+        >
+          <div
+            class="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-emerald-500/10"
+          >
+            <iconify-icon icon="mdi:video" class="text-4xl text-emerald-400"
+            ></iconify-icon>
           </div>
-          <h3 class="text-xl font-semibold text-slate-200">Join a streaming session</h3>
+          <h3 class="text-xl font-semibold text-slate-200">
+            Join a streaming session
+          </h3>
           <p class="mt-2 max-w-md text-sm text-slate-400">
-            Paste a signaling URL in the sidebar, then click <span class="font-semibold text-cyan-300">Join</span> to connect. Add <code class="text-cyan-300">?role=host</code> to the URL to stream.
+            Paste a signaling URL in the sidebar, then click <span
+              class="font-semibold text-cyan-300">Join</span
+            >
+            to connect. Add <code class="text-cyan-300">?role=host</code> to the URL
+            to stream.
           </p>
           <div class="mt-6 space-y-2 text-xs text-slate-500">
-            <p><span class="mr-2 font-bold text-slate-400">1.</span>Get a signaling URL from the host (starts with <code class="text-cyan-300">ws://</code>)</p>
-            <p><span class="mr-2 font-bold text-slate-400">2.</span>Paste it in the <span class="font-semibold text-slate-300">Connection</span> field</p>
-            <p><span class="mr-2 font-bold text-slate-400">3.</span>Click <span class="font-semibold text-cyan-300">Join</span> to enter the room and share your screen when needed</p>
+            <p>
+              <span class="mr-2 font-bold text-slate-400">1.</span>Get a
+              signaling URL from the host (starts with
+              <code class="text-cyan-300">ws://</code>)
+            </p>
+            <p>
+              <span class="mr-2 font-bold text-slate-400">2.</span>Paste it in
+              the <span class="font-semibold text-slate-300">Connection</span> field
+            </p>
+            <p>
+              <span class="mr-2 font-bold text-slate-400">3.</span>Click
+              <span class="font-semibold text-cyan-300">Join</span> to enter the room
+              and share your screen when needed
+            </p>
           </div>
         </div>
       {/if}

@@ -24,6 +24,7 @@ use uuid::Uuid;
 const DEFAULT_SIGNALING_PORT: u16 = 17777;
 const ROOM_CHANNEL_CAPACITY: usize = 64;
 const MAX_CHAT_MESSAGE_LENGTH: usize = 500;
+const MAX_DISPLAY_NAME_LENGTH: usize = 50;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -212,6 +213,11 @@ impl SignalingState {
         let Some(peer_id) = value.get("peerId").and_then(serde_json::Value::as_str) else {
             return;
         };
+        let display_name = value
+            .get("displayName")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && name.chars().count() <= MAX_DISPLAY_NAME_LENGTH);
 
         if let Some(room) = self
             .inner
@@ -222,10 +228,10 @@ impl SignalingState {
         {
             room.peer_connections
                 .insert(peer_id.to_string(), connection_id);
-            room.participants.insert(
-                connection_id,
-                format!("Participant {}", &peer_id[..peer_id.len().min(8)]),
-            );
+            if let Some(display_name) = display_name {
+                room.participants
+                    .insert(connection_id, display_name.to_string());
+            }
         }
     }
 

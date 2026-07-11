@@ -1,19 +1,22 @@
 export const MAX_CHAT_MESSAGE_LENGTH = 500;
+export const MAX_DISPLAY_NAME_LENGTH = 50;
 
 export type SignalMessage =
-  | { type: "ready"; peerId: string }
+  | { type: "ready"; peerId: string; displayName?: string }
   | { type: "participant-left"; peerId: string }
   | {
       type: "offer";
       peerId: string;
       targetPeerId: string;
       isHost?: boolean;
+      displayName?: string;
       description: RTCSessionDescriptionInit;
     }
   | {
       type: "answer";
       peerId: string;
       targetPeerId: string;
+      displayName?: string;
       description: RTCSessionDescriptionInit;
     }
   | {
@@ -44,7 +47,11 @@ export function parseSignalMessage(data: string): SignalMessage | null {
   try {
     const value: unknown = JSON.parse(data);
 
-    if (!isRecord(value) || typeof value.type !== "string" || typeof value.peerId !== "string") {
+    if (
+      !isRecord(value) ||
+      typeof value.type !== "string" ||
+      typeof value.peerId !== "string"
+    ) {
       return null;
     }
 
@@ -52,23 +59,45 @@ export function parseSignalMessage(data: string): SignalMessage | null {
 
     switch (value.type) {
       case "ready":
+        if (
+          typeof value.displayName === "string" &&
+          isValidDisplayName(value.displayName)
+        ) {
+          return {
+            type: "ready",
+            peerId,
+            displayName: value.displayName.trim(),
+          };
+        }
         return { type: "ready", peerId };
       case "participant-left":
         return { type: "participant-left", peerId };
       case "offer":
       case "answer":
-        if (typeof value.targetPeerId === "string" && isSessionDescription(value.description)) {
+        if (
+          typeof value.targetPeerId === "string" &&
+          isSessionDescription(value.description)
+        ) {
           return {
             type: value.type,
             peerId,
             targetPeerId: value.targetPeerId,
-            ...(typeof value.isHost === "boolean" ? { isHost: value.isHost } : {}),
+            ...(typeof value.isHost === "boolean"
+              ? { isHost: value.isHost }
+              : {}),
+            ...(typeof value.displayName === "string" &&
+            isValidDisplayName(value.displayName)
+              ? { displayName: value.displayName.trim() }
+              : {}),
             description: value.description,
           };
         }
         return null;
       case "ice":
-        if (typeof value.targetPeerId === "string" && isIceCandidate(value.candidate)) {
+        if (
+          typeof value.targetPeerId === "string" &&
+          isIceCandidate(value.candidate)
+        ) {
           return {
             type: "ice",
             peerId,
@@ -120,6 +149,10 @@ export function parseSignalMessage(data: string): SignalMessage | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isValidDisplayName(value: string) {
+  return value.trim().length > 0 && value.length <= MAX_DISPLAY_NAME_LENGTH;
 }
 
 function isSessionDescription(
