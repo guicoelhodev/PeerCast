@@ -963,11 +963,11 @@
         systemAudio?: "include" | "exclude";
         windowAudio?: "exclude" | "window" | "system";
       } = {
-        video: {
-          width: { ideal: quality.width },
-          height: { ideal: quality.height },
-          frameRate: { ideal: quality.fps },
-        },
+        // Do not request a fixed 16:9 capture size here. On some portals and
+        // browsers it crops an ultrawide display to satisfy width + height.
+        // The encoder bitrate/FPS below control quality without changing the
+        // selected display's aspect ratio.
+        video: { frameRate: { ideal: quality.fps } },
         audio: { suppressLocalAudioPlayback: false },
         // Ask Chromium to offer audio-capable sources in the full picker.
         // Unsupported WebViews ignore these hints.
@@ -1007,7 +1007,7 @@
       }
       await applyScreenQuality(screenTrack, quality);
       infoMessage = screenAudioTrack
-        ? `Screen and system audio sharing at ${quality.width}x${quality.height}, ${quality.fps} FPS, ${formatBitrate(quality.bitrate)}.`
+        ? `Screen and system audio sharing at up to ${quality.fps} FPS and ${formatBitrate(quality.bitrate)}. The original screen proportions are preserved.`
         : "Screen sharing started without audio. On Linux, choose a browser tab in the picker and enable Share tab audio; entire-screen and window capture usually provide video only.";
     } catch (error) {
       screenShareState = "Stopped";
@@ -1129,8 +1129,6 @@
   ) {
     try {
       await track.applyConstraints({
-        width: { ideal: quality.width },
-        height: { ideal: quality.height },
         frameRate: { ideal: quality.fps },
       });
     } catch {
@@ -1803,8 +1801,8 @@
                   {/each}
                 </select>
                 <p class="text-[10px] leading-relaxed text-slate-500">
-                  Resolution and FPS are capture hints; bitrate is applied to
-                  video senders when supported.
+                  The original screen proportions are preserved. FPS and
+                  bitrate are applied when supported.
                 </p>
                 {#if !screenAudioAvailable}
                   <div
@@ -2161,7 +2159,9 @@
                 </div>
               {/if}
               <video
-                class="h-full w-full object-cover"
+                class="h-full w-full {screenShareState === 'Running'
+                  ? 'object-contain bg-black'
+                  : 'object-cover'}"
                 autoplay
                 bind:this={localVideo}
                 muted
@@ -2241,8 +2241,10 @@
                   </div>
                 {/if}
                 <video
-                  class="h-full w-full object-cover {guest.videoState ===
-                    'off' || !hasActiveVideo(guest.stream)
+                  class="h-full w-full {guest.videoState === 'screen'
+                    ? 'object-contain bg-black'
+                    : 'object-cover'} {guest.videoState === 'off' ||
+                  !hasActiveVideo(guest.stream)
                     ? 'invisible'
                     : ''}"
                   autoplay
