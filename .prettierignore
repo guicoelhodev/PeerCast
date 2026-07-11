@@ -1,0 +1,11 @@
+.svelte-kit/
+build/
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/icons/
+static/
+*.AppImage
+*.deb
+*.rpm
+plan.md
