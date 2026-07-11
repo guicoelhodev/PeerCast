@@ -148,3 +148,34 @@ test("1 host + 3 guests join and connect via WebRTC", async ({ browser }) => {
     await ctx.close();
   }
 });
+
+test("room chat broadcasts messages to connected participants", async ({ browser }) => {
+  const hostContext = await browser.newContext();
+  const guestContext = await browser.newContext();
+  const hostPage = await hostContext.newPage();
+  const guestPage = await guestContext.newPage();
+
+  await hostPage.goto(`/?role=host&room=${encodeURIComponent(roomUrl)}`);
+  await guestPage.goto(`/?room=${encodeURIComponent(roomUrl)}`);
+  await expect(
+    hostPage.locator("text=Peers").locator("..").locator("span.text-slate-300"),
+  ).toContainText("1", { timeout: 30000 });
+
+  await hostPage.getByLabel("Toggle chat").click();
+  const hostInput = hostPage.getByLabel("Chat message");
+  await hostInput.fill("Hello from the host");
+  await hostInput.press("Enter");
+  await expect(hostPage.getByText("Hello from the host")).toBeVisible();
+
+  await expect(guestPage.getByLabel("Toggle chat")).toContainText("1");
+  await guestPage.getByLabel("Toggle chat").click();
+  await expect(guestPage.getByText("Hello from the host")).toBeVisible();
+
+  const guestInput = guestPage.getByLabel("Chat message");
+  await guestInput.fill("Hello from a guest");
+  await guestInput.press("Enter");
+  await expect(hostPage.getByText("Hello from a guest")).toBeVisible();
+
+  await hostContext.close();
+  await guestContext.close();
+});

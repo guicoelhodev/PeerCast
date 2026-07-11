@@ -1,3 +1,5 @@
+export const MAX_CHAT_MESSAGE_LENGTH = 500;
+
 export type SignalMessage =
   | { type: "ready"; peerId: string }
   | { type: "participant-left"; peerId: string }
@@ -25,6 +27,13 @@ export type SignalMessage =
       peerId: string;
       targetPeerId: string;
       audioKind: "microphone" | "system";
+    }
+  | {
+      type: "chat";
+      peerId: string;
+      messageId: string;
+      text: string;
+      sentAt: string;
     };
 
 export function serializeSignalMessage(message: SignalMessage): string {
@@ -78,6 +87,26 @@ export function parseSignalMessage(data: string): SignalMessage | null {
             peerId,
             targetPeerId: value.targetPeerId,
             audioKind: value.audioKind,
+          };
+        }
+        return null;
+      case "chat":
+        if (
+          typeof value.messageId === "string" &&
+          value.messageId.length > 0 &&
+          typeof value.text === "string" &&
+          value.text.trim().length > 0 &&
+          value.text.length <= MAX_CHAT_MESSAGE_LENGTH &&
+          typeof value.sentAt === "string" &&
+          value.sentAt.length > 0 &&
+          !Number.isNaN(Date.parse(value.sentAt))
+        ) {
+          return {
+            type: "chat",
+            peerId,
+            messageId: value.messageId,
+            text: value.text,
+            sentAt: value.sentAt,
           };
         }
         return null;

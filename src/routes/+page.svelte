@@ -4,6 +4,7 @@
   import "iconify-icon";
 
   import {
+    MAX_CHAT_MESSAGE_LENGTH,
     parseSignalMessage,
     serializeSignalMessage,
     type SignalMessage,
@@ -28,6 +29,14 @@
     height: number;
     fps: number;
     bitrate: number;
+  };
+
+  type ChatMessage = {
+    id: string;
+    peerId: string;
+    text: string;
+    sentAt: string;
+    isOwn: boolean;
   };
 
   const screenQualityPresets: ScreenQualityPreset[] = [
@@ -70,6 +79,12 @@
   let peerConnectionState = "New";
   let dataChannelState = "Closed";
   let lastDataMessage = "None";
+  let chatMessages: ChatMessage[] = [];
+  let chatDraft = "";
+  let isChatOpen = false;
+  let unreadChatMessages = 0;
+  let chatHistory: HTMLDivElement | null = null;
+  let chatInput: HTMLTextAreaElement | null = null;
   let cameraState = "Stopped";
   let micState = "Stopped";
   let screenShareState = "Stopped";
@@ -298,6 +313,68 @@
     };
   }
 
+  function addChatMessage(message: ChatMessage) {
+    if (chatMessages.some((existing) => existing.id === message.id)) return;
+    chatMessages = [...chatMessages, message].slice(-200);
+
+    if (!message.isOwn && !isChatOpen) {
+      unreadChatMessages += 1;
+    }
+
+    requestAnimationFrame(() => {
+      if (chatHistory) chatHistory.scrollTop = chatHistory.scrollHeight;
+    });
+  }
+
+  function participantName(peerId: string, isOwn: boolean) {
+    if (isOwn) return "You";
+    const peer = guestPeers.find((guest) => guest.id === peerId);
+    return peer?.isHost ? "Host" : `Participant ${peerId.slice(0, 8)}`;
+  }
+
+  function formatChatTime(sentAt: string) {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(sentAt));
+  }
+
+  function toggleChat() {
+    isChatOpen = !isChatOpen;
+    if (isChatOpen) {
+      unreadChatMessages = 0;
+      requestAnimationFrame(() => chatInput?.focus());
+    }
+  }
+
+  function sendChatMessage() {
+    const text = chatDraft.trim();
+    if (!text || text.length > MAX_CHAT_MESSAGE_LENGTH) return;
+    if (ws?.readyState !== WebSocket.OPEN || !peerRole) {
+      errorMessage = "Chat is unavailable while disconnected from the room.";
+      return;
+    }
+
+    const message: SignalMessage = {
+      type: "chat",
+      peerId: myPeerId,
+      messageId: crypto.randomUUID(),
+      text,
+      sentAt: new Date().toISOString(),
+    };
+    sendSignal(message);
+    addChatMessage({ ...message, id: message.messageId, isOwn: true });
+    chatDraft = "";
+    requestAnimationFrame(() => chatInput?.focus());
+  }
+
+  function handleChatKeydown(event: KeyboardEvent) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendChatMessage();
+    }
+  }
+
   async function connectSignaling(signalingUrl: string) {
     await new Promise<void>((resolve, reject) => {
       ws = new WebSocket(signalingUrl);
@@ -388,6 +465,12 @@
         guestPeers = guestPeers.filter((peer) => peer.id !== message.peerId);
         updatePeerCount();
       }
+      return;
+    }
+
+    if (message.type === "chat") {
+      if (message.peerId === myPeerId) return;
+      addChatMessage({ ...message, id: message.messageId, isOwn: false });
       return;
     }
 
@@ -821,6 +904,10 @@
     signalingConnectionState = "Disconnected";
     peerConnectionState = "Closed";
     dataChannelState = "Closed";
+    chatMessages = [];
+    chatDraft = "";
+    unreadChatMessages = 0;
+    isChatOpen = false;
   }
 </script>
 
@@ -1028,7 +1115,7 @@
         {#if isTauri}
           Signaling Server
         {:else if peerRole === "host"}
-          Room ({guestPeers.filter(g => g.connected).length} participant{guestPeers.filter(g => g.connected).length !== 1 ? 's' : ''})
+          Room
         {:else if peerRole === "guest"}
           Room
         {:else}
@@ -1038,9 +1125,12 @@
       <div class="flex-1"></div>
       {#if !isTauri && peerRole}
         <button
-          class="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-400 transition hover:border-slate-500 hover:text-white"
-          type="button" onclick={sendDataPing} title="Ping">
-          <iconify-icon icon="mdi:send" class="text-sm"></iconify-icon>
+          class="relative rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-400 transition hover:border-slate-500 hover:text-white"
+          type="button" onclick={toggleChat} aria-label="Toggle chat" title="Chat">
+          <iconify-icon icon="mdi:message-text-outline" class="text-sm"></iconify-icon>
+          {#if unreadChatMessages > 0}
+            <span class="absolute -right-1 -top-1 min-w-4 rounded-full bg-cyan-400 px-1 text-[9px] font-bold leading-4 text-slate-950">{unreadChatMessages > 99 ? "99+" : unreadChatMessages}</span>
+          {/if}
         </button>
         <button
           class="flex items-center gap-1.5 rounded-lg bg-red-500/20 px-3 py-1 text-xs font-medium text-red-400 transition hover:bg-red-500/30"
@@ -1128,7 +1218,7 @@
         </div>
       {:else if peerRole}
         <!-- BROWSER: Call active -->
-        <div class="flex h-full flex-col gap-2">
+        <div class="flex h-full min-h-0 gap-3">
           <div class={`video-grid ${videoGridClass}`}>
             <div class="video-tile relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group">
               <div class="absolute left-3 top-3 z-10 flex items-center gap-2 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur">
@@ -1188,6 +1278,51 @@
               </div>
             {/each}
           </div>
+          {#if isChatOpen}
+            <section class="flex w-80 shrink-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/80" aria-label="Room chat">
+              <header class="flex items-center justify-between border-b border-slate-800 px-3 py-2.5">
+                <div class="flex items-center gap-2">
+                  <iconify-icon icon="mdi:message-text-outline" class="text-cyan-300"></iconify-icon>
+                  <h3 class="text-sm font-semibold text-slate-200">Room chat</h3>
+                </div>
+                <button class="rounded p-1 text-slate-400 transition hover:bg-slate-800 hover:text-white" type="button" onclick={toggleChat} aria-label="Close chat" title="Close chat">
+                  <iconify-icon icon="mdi:close"></iconify-icon>
+                </button>
+              </header>
+              <div class="flex-1 space-y-3 overflow-y-auto p-3" bind:this={chatHistory} aria-live="polite">
+                {#if chatMessages.length === 0}
+                  <p class="pt-5 text-center text-xs text-slate-500">No messages yet. Say hello to the room.</p>
+                {:else}
+                  {#each chatMessages as message (message.id)}
+                    <article class="flex flex-col {message.isOwn ? 'items-end' : 'items-start'}">
+                      <div class="mb-1 flex max-w-full items-center gap-1.5 text-[10px] text-slate-500">
+                        <span>{participantName(message.peerId, message.isOwn)}</span>
+                        <time datetime={message.sentAt}>{formatChatTime(message.sentAt)}</time>
+                      </div>
+                      <p class="max-w-full whitespace-pre-wrap break-words rounded-xl px-3 py-2 text-xs leading-relaxed {message.isOwn ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-200'}">{message.text}</p>
+                    </article>
+                  {/each}
+                {/if}
+              </div>
+              <form class="border-t border-slate-800 p-3" onsubmit={(event) => { event.preventDefault(); sendChatMessage(); }}>
+                <textarea
+                  class="min-h-18 w-full resize-none rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-500 disabled:opacity-60"
+                  bind:this={chatInput}
+                  bind:value={chatDraft}
+                  maxlength={MAX_CHAT_MESSAGE_LENGTH}
+                  onkeydown={handleChatKeydown}
+                  placeholder="Message the room"
+                  aria-label="Chat message"
+                  disabled={signalingConnectionState !== "Connected"}></textarea>
+                <div class="mt-2 flex items-center justify-between gap-2">
+                  <span class="text-[10px] text-slate-500">{chatDraft.length}/{MAX_CHAT_MESSAGE_LENGTH}</span>
+                  <button class="rounded-lg bg-cyan-500 p-1.5 text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50" type="submit" disabled={!chatDraft.trim() || signalingConnectionState !== "Connected"} aria-label="Send message" title="Send message">
+                    <iconify-icon icon="mdi:send" class="text-sm"></iconify-icon>
+                  </button>
+                </div>
+              </form>
+            </section>
+          {/if}
         </div>
       {:else}
         <!-- BROWSER: No call -->

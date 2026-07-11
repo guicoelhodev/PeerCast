@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 const DEFAULT_SIGNALING_PORT: u16 = 17777;
 const ROOM_CHANNEL_CAPACITY: usize = 64;
+const MAX_CHAT_MESSAGE_LENGTH: usize = 500;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -217,6 +218,43 @@ impl SignalingState {
         room.peer_connections.remove(peer_id);
         true
     }
+
+    fn connection_matches_peer(&self, room_id: &str, connection_id: Uuid, peer_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("signaling state mutex poisoned")
+            .rooms
+            .get(room_id)
+            .and_then(|room| room.peer_connections.get(peer_id))
+            == Some(&connection_id)
+    }
+}
+
+fn is_valid_chat_message(payload: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return false;
+    };
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("chat") {
+        return true;
+    }
+
+    let Some(text) = value.get("text").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    !text.trim().is_empty()
+        && text.chars().count() <= MAX_CHAT_MESSAGE_LENGTH
+        && value
+            .get("messageId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        && value
+            .get("sentAt")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        && value
+            .get("peerId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
 }
 
 pub async fn run_server(state: SignalingState) -> Result<(), String> {
@@ -266,8 +304,16 @@ async fn handle_socket(socket: WebSocket, room_id: String, state: SignalingState
         while let Some(Ok(message)) = receiver.next().await {
             match message {
                 Message::Text(text) => {
+                    if !is_valid_chat_message(&text) {
+                        continue;
+                    }
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                         if let Some(id) = value.get("peerId").and_then(serde_json::Value::as_str) {
+                            if value.get("type").and_then(serde_json::Value::as_str) == Some("chat")
+                                && !receive_state.connection_matches_peer(&receive_room_id, peer_id, id)
+                            {
+                                continue;
+                            }
                             *receive_client_peer_id
                                 .lock()
                                 .expect("client peer ID mutex poisoned") = Some(id.to_string());

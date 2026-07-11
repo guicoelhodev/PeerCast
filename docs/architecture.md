@@ -60,6 +60,12 @@ ws://HOST_IP:17777/ws/ROOM_ID
 
 All WebSocket messages in a room are broadcast to every client (minus sender). No server-side peer addressing — routing is handled by the frontend using `peerId`.
 
+## Room Chat
+
+The room chat uses the existing WebSocket relay rather than WebRTC data channels. This makes text chat available as soon as a participant connects to the room, independently of media negotiation. Chat messages are broadcast to the room, retained only in each browser session (up to 200 messages), and are not persisted by the Rust server.
+
+Chat text is limited to 500 characters. The frontend validates incoming payloads and the relay rejects malformed, oversized, empty, or peer-ID-spoofed chat messages.
+
 ## Signaling Protocol
 
 Current protocol (implemented in `src/lib/signaling-protocol.ts`):

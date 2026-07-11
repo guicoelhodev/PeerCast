@@ -144,6 +144,24 @@ When a guest sends a `ready` message, the host immediately creates a peer connec
 
 Faster connection, better UX for multi-guest scenarios. Trade-off: any visitor with the room URL can join. Acceptable for local-first MVP since rooms are shared on trusted networks or VPNs.
 
+## Decision: Use the Signaling Relay for Ephemeral Room Chat
+
+### Status
+
+Accepted
+
+### Context
+
+The app already has a room-scoped WebSocket broadcast relay. WebRTC data channels would require opening and maintaining a channel for every connection in the mesh, and would keep chat unavailable until peer negotiation succeeds.
+
+### Decision
+
+Room chat is sent as validated `chat` WebSocket messages through the embedded relay. It is broadcast to connected room participants and retained only in their browser memory.
+
+### Consequences
+
+Chat is available before media connects and has no persistence or additional infrastructure. The host's signaling server can observe message content; with the current `ws://` setup, chat must be treated as plaintext on the network and used only on trusted LANs or VPNs.
+
 ## Decision: Guest Receive-Only (Streamer→Viewer Model)
 
 ### Status
