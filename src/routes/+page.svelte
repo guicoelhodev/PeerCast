@@ -21,8 +21,22 @@
     signalingUrl: string;
   };
 
+  interface GuestPeer {
+    id: string;
+    pc: RTCPeerConnection;
+    stream: MediaStream;
+    connected: boolean;
+    isHost: boolean;
+    videoEl: HTMLVideoElement | null;
+    audioEl: HTMLAudioElement | null;
+    volume: number;
+  }
+
+  let guestPeers: GuestPeer[] = [];
+
   let signalingStatus: SignalingStatus | null = null;
   let room: RoomInfo | null = null;
+  let roomParticipants: string[] = [];
   let errorMessage = "";
   let infoMessage = "";
   let isCreatingRoom = false;
@@ -35,24 +49,28 @@
   let lastDataMessage = "None";
   let cameraState = "Stopped";
   let micState = "Stopped";
+  let screenShareState = "Stopped";
+  let wasCameraOnBeforeShare = false;
+  let screenStream: MediaStream | null = null;
   let webrtcAvailable = true;
   let isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  let isConnecting = false;
+  let myPeerId = "";
 
   let ws: WebSocket | null = null;
-  let peerConnection: RTCPeerConnection | null = null;
   let dataChannel: RTCDataChannel | null = null;
   let localStream: MediaStream | null = null;
-  let remoteStream: MediaStream | null = null;
   let localVideo: HTMLVideoElement | null = null;
-  let remoteVideo: HTMLVideoElement | null = null;
-  let remoteAudio: HTMLAudioElement | null = null;
-  let hasSentOffer = false;
-  let pendingGuest = false;
+  let videoGridClass = "video-grid--one";
 
   let copied = false;
+  let participantPoll: ReturnType<typeof setInterval> | null = null;
+
+  $: videoGridClass = getVideoGridClass(guestPeers.length + 1);
 
   onMount(async () => {
     webrtcAvailable = typeof RTCPeerConnection !== "undefined";
+    myPeerId = crypto.randomUUID();
 
     const params = new URLSearchParams(window.location.search);
     const roomUrl = params.get("room");
@@ -63,7 +81,13 @@
       browserHostUrl = buildBrowserRoomUrl(roomUrl);
 
       if (role === "host" && webrtcAvailable) {
+        isConnecting = true;
         await startHost(roomUrl);
+        isConnecting = false;
+      } else if (webrtcAvailable) {
+        isConnecting = true;
+        await joinRoom();
+        isConnecting = false;
       }
     }
 
@@ -86,11 +110,28 @@
       joinUrl = room.signalingUrl;
       browserHostUrl = buildBrowserRoomUrl(room.signalingUrl);
       signalingStatus = await invoke<SignalingStatus>("signaling_status");
+      startParticipantPolling();
       infoMessage = "Room created. Open the browser URL in Chrome/Firefox to start streaming.";
     } catch (error) {
       errorMessage = `Failed to create room: ${String(error)}`;
     } finally {
       isCreatingRoom = false;
+    }
+  }
+
+  async function stopCurrentRoom() {
+    if (!room) return;
+
+    try {
+      await invoke<boolean>("stop_room", { roomId: room.roomId });
+      room = null;
+      roomParticipants = [];
+      stopParticipantPolling();
+      joinUrl = "";
+      browserHostUrl = "";
+      infoMessage = "Room stopped. All guests disconnected.";
+    } catch (error) {
+      errorMessage = `Failed to stop room: ${String(error)}`;
     }
   }
 
@@ -107,6 +148,26 @@
     return url.toString();
   }
 
+  async function refreshRoomParticipants() {
+    if (!room || !isTauri) return;
+    roomParticipants = await invoke<string[]>("room_participants", {
+      roomId: room.roomId,
+    });
+  }
+
+  function startParticipantPolling() {
+    stopParticipantPolling();
+    refreshRoomParticipants();
+    participantPoll = setInterval(refreshRoomParticipants, 2000);
+  }
+
+  function stopParticipantPolling() {
+    if (participantPoll) {
+      clearInterval(participantPoll);
+      participantPoll = null;
+    }
+  }
+
   async function copyText(text: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -120,31 +181,12 @@
   async function startHost(signalingUrl: string) {
     closeConnection();
     peerRole = "host";
-    hasSentOffer = false;
-    pendingGuest = false;
-
-    if (webrtcAvailable) {
-      setupPeerConnection();
-      dataChannel = peerConnection?.createDataChannel("control") ?? null;
-      bindDataChannel(dataChannel);
-    }
+    guestPeers = [];
 
     await connectSignaling(signalingUrl);
     infoMessage = webrtcAvailable
-      ? "Host ready. Waiting for a guest to join."
+      ? "Host ready. Waiting for guests to join."
       : "Room created (signaling only). Open the room URL in Chrome/Firefox to stream.";
-  }
-
-  async function hostRoomInThisBrowser() {
-    if (!joinUrl.trim()) {
-      errorMessage = "Paste a room WebSocket URL before hosting.";
-      return;
-    }
-
-    errorMessage = "";
-    infoMessage = "";
-    browserHostUrl = buildBrowserRoomUrl(joinUrl.trim());
-    await startHost(joinUrl.trim());
   }
 
   async function joinRoom() {
@@ -153,75 +195,68 @@
       return;
     }
 
+    const params = new URLSearchParams(window.location.search);
+    const role = params.get("role");
+
+    if (role === "host") {
+      errorMessage = "";
+      infoMessage = "";
+      isConnecting = true;
+      browserHostUrl = buildBrowserRoomUrl(joinUrl.trim());
+      await startHost(joinUrl.trim());
+      isConnecting = false;
+      return;
+    }
+
+    isConnecting = true;
     closeConnection();
     errorMessage = "";
     infoMessage = "";
     peerRole = "guest";
 
-    if (webrtcAvailable) {
-      setupPeerConnection();
-    }
-
     await connectSignaling(joinUrl.trim());
 
     if (webrtcAvailable) {
-      sendSignal({ type: "ready" });
-      infoMessage = "Guest ready. Waiting for host offer.";
+      sendSignal({ type: "ready", peerId: myPeerId });
+      infoMessage = "Joined the room. Connecting to participants.";
     } else {
       infoMessage =
         "WebSocket connected but WebRTC not available. Open this URL in a browser.";
     }
+    isConnecting = false;
   }
 
-  function setupPeerConnection() {
-    if (!webrtcAvailable) {
-      errorMessage =
-        "WebRTC not available in this context. Open http://localhost:1420 in a browser.";
-      return;
-    }
-    peerConnection = new RTCPeerConnection({ iceServers: [] });
-    peerConnectionState = peerConnection.connectionState;
+  function createPeerConnectionForGuest(peerId: string): RTCPeerConnection {
+    const pc = new RTCPeerConnection({ iceServers: [] });
 
-    peerConnection.onconnectionstatechange = () => {
-      peerConnectionState = peerConnection?.connectionState ?? "closed";
-    };
-
-    peerConnection.onicecandidate = (event) => {
+    pc.onicecandidate = (event) => {
       if (event.candidate) {
-        sendSignal({ type: "ice", candidate: event.candidate.toJSON() });
+        sendSignal({
+          type: "ice",
+          peerId: myPeerId,
+          targetPeerId: peerId,
+          candidate: event.candidate.toJSON(),
+        });
       }
     };
 
-    peerConnection.ondatachannel = (event) => {
-      dataChannel = event.channel;
-      bindDataChannel(dataChannel);
+    pc.onconnectionstatechange = () => {
+      const peer = guestPeers.find((guest) => guest.id === peerId);
+      if (!peer) return;
+
+      peer.connected = pc.connectionState === "connected";
+      guestPeers = guestPeers;
+      updatePeerCount();
     };
 
-    peerConnection.ontrack = (event) => {
-      remoteStream ??= new MediaStream();
-      remoteStream.addTrack(event.track);
-      attachVideoStreams();
-    };
-
-    addLocalTracksToPeerConnection();
+    return pc;
   }
 
-  function bindDataChannel(channel: RTCDataChannel | null) {
-    if (!channel) {
-      dataChannelState = "Closed";
-      return;
-    }
-
-    dataChannelState = channel.readyState;
-    channel.onopen = () => {
-      dataChannelState = channel.readyState;
-      channel.send(`hello from ${peerRole}`);
-    };
-    channel.onclose = () => {
-      dataChannelState = channel.readyState;
-    };
-    channel.onmessage = (event) => {
-      lastDataMessage = String(event.data);
+  function bindGuestOnTrack(guest: GuestPeer) {
+    guest.pc.ontrack = (event) => {
+      guest.stream.addTrack(event.track);
+      guestPeers = guestPeers;
+      attachVideoStreams();
     };
   }
 
@@ -251,74 +286,106 @@
     const message = parseSignalMessage(data);
     if (!message) return;
 
-    if (message.type === "ready" && peerRole === "host" && !hasSentOffer) {
-      if (!peerConnection) {
-        errorMessage =
-          "Guest tried to connect but WebRTC is not available in this WebView.";
+    if (message.type === "ready") {
+      if (!webrtcAvailable) {
         return;
       }
 
-      if (pendingGuest) {
-        sendSignal({ type: "reject" });
+      const guestId = message.peerId;
+      if (guestId === myPeerId || guestPeers.find((g) => g.id === guestId)) {
         return;
       }
 
-      pendingGuest = true;
-      infoMessage = "Guest wants to connect. Accept or reject below.";
+      const pc = createPeerConnectionForGuest(guestId);
+      const guest: GuestPeer = {
+        id: guestId,
+        pc,
+        stream: new MediaStream(),
+        connected: false,
+        isHost: false,
+        volume: 1,
+        videoEl: null,
+        audioEl: null,
+      };
+      bindGuestOnTrack(guest);
+      guestPeers = [...guestPeers, guest];
+      addLocalTracksToPeerConnection(pc);
+      updatePeerCount();
+
+      infoMessage = `Participant ${guestId.slice(0, 8)} joined. Connecting...`;
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      sendSignal({
+        type: "offer",
+        peerId: myPeerId,
+        targetPeerId: guestId,
+        isHost: peerRole === "host",
+        description: offer,
+      });
+      infoMessage = `Offer sent to ${guestId.slice(0, 8)}.`;
+
       return;
     }
 
-    if (message.type === "guest-connected" && peerRole === "guest") {
-      infoMessage = "Host accepted. Waiting for offer.";
-      return;
-    }
+    if (message.type === "offer") {
+      if (message.targetPeerId !== myPeerId) return;
 
-    if (message.type === "reject" && peerRole === "guest") {
-      errorMessage = "Host rejected the connection.";
-      closeConnection();
-      return;
-    }
+      if (!webrtcAvailable) {
+        return;
+      }
 
-    if (!peerConnection) return;
+      let guest = guestPeers.find((peer) => peer.id === message.peerId);
+      if (!guest) {
+        const pc = createPeerConnectionForGuest(message.peerId);
+        guest = {
+          id: message.peerId,
+          pc,
+          stream: new MediaStream(),
+          connected: false,
+          isHost: message.isHost === true,
+          volume: 1,
+          videoEl: null,
+          audioEl: null,
+        };
+        bindGuestOnTrack(guest);
+        guestPeers = [...guestPeers, guest];
+      } else if (message.isHost) {
+        guest.isHost = true;
+        guestPeers = guestPeers;
+      }
 
-    if (message.type === "offer" && peerRole === "guest") {
-      await peerConnection.setRemoteDescription(message.description);
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
-      sendSignal({ type: "answer", description: answer });
+      addLocalTracksToPeerConnection(guest.pc);
+      await guest.pc.setRemoteDescription(message.description);
+      const answer = await guest.pc.createAnswer();
+      await guest.pc.setLocalDescription(answer);
+      sendSignal({
+        type: "answer",
+        peerId: myPeerId,
+        targetPeerId: message.peerId,
+        description: answer,
+      });
       infoMessage = "Answer sent. Waiting for peer connection.";
       return;
     }
 
-    if (message.type === "answer" && peerRole === "host") {
-      await peerConnection.setRemoteDescription(message.description);
-      infoMessage = "Answer received. Waiting for peer connection.";
+    if (message.type === "answer") {
+      if (message.targetPeerId !== myPeerId) return;
+      const guest = guestPeers.find((g) => g.id === message.peerId);
+      if (!guest) return;
+
+      await guest.pc.setRemoteDescription(message.description);
+      infoMessage = `Participant ${message.peerId.slice(0, 8)} connected.`;
       return;
     }
 
     if (message.type === "ice") {
-      await peerConnection.addIceCandidate(message.candidate);
+      if (message.targetPeerId !== myPeerId) return;
+      const guest = guestPeers.find((g) => g.id === message.peerId);
+      if (guest) {
+        await guest.pc.addIceCandidate(message.candidate);
+      }
     }
-  }
-
-  async function acceptGuest() {
-    if (!pendingGuest || !peerConnection) return;
-
-    pendingGuest = false;
-    hasSentOffer = true;
-    sendSignal({ type: "guest-connected" });
-    await sendHostOffer();
-    errorMessage = "";
-    infoMessage = "";
-  }
-
-  function rejectGuest() {
-    if (!pendingGuest) return;
-
-    pendingGuest = false;
-    sendSignal({ type: "reject" });
-    errorMessage = "";
-    infoMessage = "";
   }
 
   function sendSignal(message: SignalMessage) {
@@ -327,29 +394,21 @@
     }
   }
 
-  async function sendHostOffer() {
-    if (!peerConnection || peerRole !== "host") {
-      return;
-    }
-
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-    sendSignal({ type: "offer", description: offer });
+  function updatePeerCount() {
+    const connected = guestPeers.filter((g) => g.connected).length;
+    peerConnectionState = connected > 0 ? `${connected} connected` : "New";
   }
 
   function sendDataPing() {
-    if (dataChannel?.readyState !== "open") {
-      errorMessage = "Data channel is not open yet.";
-      return;
-    }
-
-    dataChannel.send(
-      `ping from ${peerRole} at ${new Date().toLocaleTimeString()}`,
-    );
+    errorMessage = "Data channel not available in multi-guest mode.";
   }
 
   async function startCamera() {
     errorMessage = "";
+
+    if (screenShareState === "Running") {
+      stopScreenShare();
+    }
 
     try {
       localStream = await navigator.mediaDevices.getUserMedia({
@@ -359,10 +418,11 @@
       cameraState = "Running";
       micState = "Active";
       attachVideoStreams();
-      addLocalTracksToPeerConnection();
+      addLocalTracksToAllPeers();
 
-      if (peerRole === "host" && hasSentOffer) {
-        await sendHostOffer();
+      for (const guest of guestPeers) {
+        // Camera tracks need an offer even while the connection state is still settling.
+        await renegotiate(guest);
       }
     } catch (error) {
       cameraState = "Error";
@@ -395,37 +455,171 @@
     localStream = null;
     cameraState = "Stopped";
     micState = "Stopped";
+    for (const guest of guestPeers) {
+      for (const sender of guest.pc.getSenders()) {
+        if (sender.track?.kind === "video" || sender.track?.kind === "audio") {
+          sender.replaceTrack(null).catch(() => {});
+        }
+      }
+    }
     attachVideoStreams();
   }
 
-  function addLocalTracksToPeerConnection() {
-    if (!peerConnection || !localStream) return;
-    const existingTrackIds = new Set(
-      peerConnection.getSenders().map((sender) => sender.track?.id),
-    );
+  function toggleCamera() {
+    if (cameraState === "Running") {
+      stopCamera();
+    } else {
+      startCamera();
+    }
+  }
+
+  async function startScreenShare() {
+    errorMessage = "";
+
+    try {
+      screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false,
+      });
+
+      screenShareState = "Running";
+
+      const screenTrack = screenStream.getVideoTracks()[0];
+      screenTrack.onended = () => stopScreenShare();
+
+      wasCameraOnBeforeShare = cameraState === "Running";
+
+      if (localStream) {
+        localStream.getVideoTracks().forEach((t) => t.stop());
+      }
+
+      localStream = screenStream;
+      attachVideoStreams();
+      sendVideoTrackToAllPeers(screenTrack);
+    } catch (error) {
+      screenShareState = "Stopped";
+      if (String(error) !== "AbortError") {
+        errorMessage = `Screen share failed: ${String(error)}`;
+      }
+    }
+  }
+
+  function stopScreenShare() {
+    if (!screenStream) return;
+
+    screenStream.getTracks().forEach((track) => track.stop());
+    screenStream = null;
+    localStream = null;
+    screenShareState = "Stopped";
+    attachVideoStreams();
+
+    if (wasCameraOnBeforeShare) {
+      startCamera();
+    }
+  }
+
+  function sendVideoTrackToAllPeers(track: MediaStreamTrack) {
+    for (const guest of guestPeers) {
+      const sender = guest.pc.getSenders().find((s) => s.track?.kind === "video");
+      if (sender) {
+        sender.replaceTrack(track).catch(() => {});
+      } else if (localStream) {
+        guest.pc.addTrack(track, localStream);
+        renegotiate(guest);
+      }
+    }
+  }
+
+  async function renegotiate(guest: GuestPeer) {
+    try {
+      const offer = await guest.pc.createOffer();
+      await guest.pc.setLocalDescription(offer);
+      sendSignal({
+        type: "offer",
+        peerId: myPeerId,
+        targetPeerId: guest.id,
+        isHost: peerRole === "host",
+        description: offer,
+      });
+    } catch {
+      // ignore renegotiation errors
+    }
+  }
+
+  function addLocalTracksToAllPeers() {
+    for (const guest of guestPeers) {
+      addLocalTracksToPeerConnection(guest.pc);
+    }
+  }
+
+  function addLocalTracksToPeerConnection(pc: RTCPeerConnection) {
+    if (!localStream) return;
     for (const track of localStream.getTracks()) {
-      if (!existingTrackIds.has(track.id)) {
-        peerConnection.addTrack(track, localStream);
+      const sender = pc.getSenders().find((item) => item.track?.kind === track.kind);
+      if (sender) {
+        sender.replaceTrack(track).catch(() => {});
+      } else {
+        pc.addTrack(track, localStream);
       }
     }
   }
 
   function attachVideoStreams() {
     if (localVideo) localVideo.srcObject = localStream;
-    if (remoteVideo) remoteVideo.srcObject = remoteStream;
-    if (remoteAudio) remoteAudio.srcObject = remoteStream;
+    for (const guest of guestPeers) {
+      if (guest.videoEl) guest.videoEl.srcObject = guest.stream;
+      if (guest.audioEl) guest.audioEl.srcObject = guest.stream;
+    }
+  }
+
+  function toggleFullscreen(el: HTMLVideoElement | null) {
+    if (!el) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      el.requestFullscreen();
+    }
+  }
+
+  function setGuestVolume(guest: GuestPeer, volume: number) {
+    guest.volume = volume;
+    if (guest.audioEl) guest.audioEl.volume = volume;
+  }
+
+  function getVideoGridClass(participantCount: number) {
+    if (participantCount === 1) {
+      return "video-grid--one";
+    }
+
+    if (participantCount === 2) {
+      return "video-grid--two";
+    }
+
+    if (participantCount <= 4) {
+      return "video-grid--four";
+    }
+
+    return "video-grid--nine";
   }
 
   function closeConnection() {
     ws?.close();
     dataChannel?.close();
-    peerConnection?.close();
+    screenStream?.getTracks().forEach((track) => track.stop());
+    localStream?.getTracks().forEach((track) => track.stop());
+    for (const guest of guestPeers) {
+      guest.pc.close();
+    }
     ws = null;
     dataChannel = null;
-    peerConnection = null;
+    screenStream = null;
+    localStream = null;
+    guestPeers = [];
     peerRole = null;
-    hasSentOffer = false;
-    pendingGuest = false;
+    isConnecting = false;
+    screenShareState = "Stopped";
+    cameraState = "Stopped";
+    micState = "Stopped";
     signalingConnectionState = "Disconnected";
     peerConnectionState = "Closed";
     dataChannelState = "Closed";
@@ -456,26 +650,6 @@
         </div>
       {/if}
 
-      {#if pendingGuest}
-        <div class="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-3">
-          <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-amber-200">Incoming request</p>
-          <div class="flex gap-2">
-            <button
-              class="flex flex-1 items-center justify-center gap-1.5 rounded bg-emerald-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-emerald-400"
-              type="button" onclick={acceptGuest}>
-              <iconify-icon icon="mdi:check" class="text-sm"></iconify-icon>
-              Accept
-            </button>
-            <button
-              class="flex flex-1 items-center justify-center gap-1.5 rounded border border-red-400/30 px-3 py-2 text-xs font-semibold text-red-300 transition hover:bg-red-400/10"
-              type="button" onclick={rejectGuest}>
-              <iconify-icon icon="mdi:close" class="text-sm"></iconify-icon>
-              Reject
-            </button>
-          </div>
-        </div>
-      {/if}
-
       {#if isTauri}
         <!-- ========== TAURI SERVER VIEW ========== -->
         <div>
@@ -490,39 +664,14 @@
         </div>
 
         {#if room}
-          <div class="space-y-2">
-            <p class="text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500">Room Details</p>
-            <div class="rounded-lg bg-slate-800/70 p-2.5">
-              <p class="text-[10px] uppercase tracking-wider text-slate-500">Room ID</p>
-              <p class="mt-0.5 break-all font-mono text-[11px] text-slate-300">{room.roomId}</p>
-            </div>
-            <div class="rounded-lg bg-slate-800/70 p-2.5">
-              <div class="flex items-center justify-between">
-                <p class="text-[10px] uppercase tracking-wider text-slate-500">Signaling URL</p>
-                <button
-                  class="rounded p-0.5 text-slate-500 transition hover:text-cyan-400"
-                  type="button" onclick={() => copyText(room!.signalingUrl)}
-                  title="Copy">
-                  <iconify-icon icon={copied ? "mdi:check" : "mdi:content-copy"} class="text-xs"></iconify-icon>
-                </button>
-              </div>
-              <p class="mt-0.5 break-all font-mono text-[11px] text-emerald-300">{room.signalingUrl}</p>
-            </div>
-            <div class="rounded-lg bg-slate-800/70 p-2.5">
-              <div class="flex items-center justify-between">
-                <p class="text-[10px] uppercase tracking-wider text-slate-500">Open stream in browser</p>
-                <button
-                  class="rounded p-0.5 text-slate-500 transition hover:text-cyan-400"
-                  type="button" onclick={() => copyText(browserHostUrl)}
-                  title="Copy">
-                  <iconify-icon icon={copied ? "mdi:check" : "mdi:content-copy"} class="text-xs"></iconify-icon>
-                </button>
-              </div>
-              <p class="mt-0.5 break-all font-mono text-[11px] text-cyan-300">{browserHostUrl}</p>
-              <p class="mt-2 text-[10px] leading-relaxed text-slate-500">
-                Open this URL in Chrome/Firefox. This Tauri app runs the signaling server only.
-              </p>
-            </div>
+          <div>
+            <p class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500">Active Room</p>
+            <button
+              class="flex w-full items-center justify-center gap-2 rounded-lg bg-red-500 px-3 py-2 text-xs font-semibold text-white shadow-lg shadow-red-500/25 transition hover:bg-red-400"
+              type="button" onclick={stopCurrentRoom}>
+              <iconify-icon icon="mdi:stop" class="text-sm"></iconify-icon>
+              Stop Room
+            </button>
           </div>
         {/if}
 
@@ -572,20 +721,12 @@
               <iconify-icon icon={copied ? "mdi:check" : "mdi:content-copy"} class="text-xs"></iconify-icon>
             </button>
           </div>
-          <div class="mt-2 flex gap-2">
-            <button
-              class="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 shadow-lg shadow-cyan-500/25 transition hover:bg-cyan-400"
+          <button
+              class="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 shadow-lg shadow-cyan-500/25 transition hover:bg-cyan-400"
               type="button" onclick={joinRoom}>
               <iconify-icon icon="mdi:login" class="text-sm"></iconify-icon>
               Join
             </button>
-            <button
-              class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-emerald-400/30 px-3 py-2 text-xs font-semibold text-emerald-300 transition hover:bg-emerald-400/10"
-              type="button" onclick={hostRoomInThisBrowser}>
-              <iconify-icon icon="mdi:broadcast" class="text-sm"></iconify-icon>
-              Host
-            </button>
-          </div>
         </div>
 
         <div>
@@ -603,17 +744,10 @@
               </span>
             </div>
             <div class="flex items-center justify-between">
-              <span class="text-[11px] text-slate-500">WebRTC</span>
+              <span class="text-[11px] text-slate-500">Peers</span>
               <span class="flex items-center gap-1.5 text-[11px] font-mono text-slate-300">
-                <span class="inline-block h-1.5 w-1.5 rounded-full {peerConnectionState === 'connected' ? 'bg-emerald-400' : peerConnectionState === 'failed' ? 'bg-red-400' : 'bg-amber-400'}"></span>
-                {peerConnectionState}
-              </span>
-            </div>
-            <div class="flex items-center justify-between">
-              <span class="text-[11px] text-slate-500">Data ch.</span>
-              <span class="flex items-center gap-1.5 text-[11px] font-mono text-slate-300">
-                <span class="inline-block h-1.5 w-1.5 rounded-full {dataChannelState === 'open' ? 'bg-emerald-400' : 'bg-amber-400'}"></span>
-                {dataChannelState}
+                <span class="inline-block h-1.5 w-1.5 rounded-full {guestPeers.length > 0 ? 'bg-emerald-400' : 'bg-amber-400'}"></span>
+                {guestPeers.length}
               </span>
             </div>
           </div>
@@ -624,19 +758,20 @@
             <p class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500">Devices</p>
             <div class="flex gap-2">
               <button
-                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-slate-700 px-2 py-2 text-[11px] font-medium text-slate-300 transition hover:border-emerald-500 hover:text-emerald-300"
-                type="button" onclick={startCamera} title="Camera">
-                <iconify-icon icon="mdi:video" class="text-sm"></iconify-icon>
+                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {cameraState === 'Running' ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-emerald-500 hover:text-emerald-300"
+                type="button" onclick={toggleCamera} title={cameraState === "Running" ? "Stop camera" : "Start camera"}>
+                <iconify-icon icon={cameraState === "Running" ? "mdi:video-off" : "mdi:video"} class="text-sm"></iconify-icon>
               </button>
               <button
-                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-slate-700 px-2 py-2 text-[11px] font-medium text-slate-300 transition hover:border-red-500 hover:text-red-300"
-                type="button" onclick={stopCamera} title="Stop camera">
-                <iconify-icon icon="mdi:video-off" class="text-sm"></iconify-icon>
-              </button>
-              <button
-                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {micState === 'Muted' ? 'border-red-500/50 bg-red-500/10 text-red-300' : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-cyan-500 hover:text-cyan-300"
+                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {micState === 'Muted' ? 'border-red-500/50 bg-red-500/10 text-red-300' : micState === 'Active' ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-cyan-500 hover:text-cyan-300"
                 type="button" onclick={toggleMic} title={micState === "Muted" ? "Unmute" : "Mute"}>
                 <iconify-icon icon={micState === "Muted" ? "mdi:microphone-off" : "mdi:microphone"} class="text-sm"></iconify-icon>
+              </button>
+              <button
+                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {screenShareState === 'Running' ? 'border-purple-500/50 bg-purple-500/10 text-purple-300' : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-purple-500 hover:text-purple-300"
+                type="button" onclick={screenShareState === "Running" ? stopScreenShare : startScreenShare}
+                title={screenShareState === "Running" ? "Stop sharing" : "Share screen"}>
+                <iconify-icon icon={screenShareState === "Running" ? "mdi:monitor-off" : "mdi:monitor-share"} class="text-sm"></iconify-icon>
               </button>
             </div>
           </div>
@@ -663,7 +798,9 @@
               : "Stopped"
             : room?.roomId
               ? room.roomId.slice(0, 12) + "..."
-              : "No room"}
+              : peerRole === "host"
+                ? `${guestPeers.filter(g => g.connected).length} guest(s)`
+                : "No room"}
         </p>
       </div>
     </div>
@@ -676,9 +813,9 @@
         {#if isTauri}
           Signaling Server
         {:else if peerRole === "host"}
-          Streaming
+          Room ({guestPeers.filter(g => g.connected).length} participant{guestPeers.filter(g => g.connected).length !== 1 ? 's' : ''})
         {:else if peerRole === "guest"}
-          Watching
+          Room
         {:else}
           Join a stream
         {/if}
@@ -701,8 +838,53 @@
 
     <div class="flex-1 overflow-y-auto p-4">
       {#if isTauri}
-        <!-- TAURI: Server instructions -->
-        <div class="flex h-full flex-col items-center justify-center px-4 text-center">
+        {#if room}
+          <div class="mx-auto flex h-full w-full max-w-5xl flex-col gap-5 py-4">
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-[11px] font-semibold uppercase tracking-[0.15em] text-amber-300">Room active</p>
+                <h3 class="mt-1 text-2xl font-semibold text-slate-100">Connection details</h3>
+              </div>
+              <span class="rounded-full bg-emerald-400/10 px-3 py-1 text-xs font-medium text-emerald-300">{roomParticipants.length} connected</span>
+            </div>
+
+            <div class="grid gap-4 lg:grid-cols-2">
+              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                <p class="text-[10px] uppercase tracking-wider text-slate-500">Room ID</p>
+                <p class="mt-2 break-all font-mono text-sm text-slate-300">{room.roomId}</p>
+              </div>
+              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                <p class="text-[10px] uppercase tracking-wider text-slate-500">Connected participants</p>
+                {#if roomParticipants.length}
+                  <div class="mt-3 space-y-2">
+                    {#each roomParticipants as participant}
+                      <div class="flex items-center gap-2 text-sm text-slate-200"><span class="h-2 w-2 rounded-full bg-emerald-400"></span>{participant}</div>
+                    {/each}
+                  </div>
+                {:else}
+                  <p class="mt-2 text-sm text-slate-500">Waiting for participants to join.</p>
+                {/if}
+              </div>
+            </div>
+
+            <div class="grid gap-4 lg:grid-cols-3">
+              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                <div class="flex items-center justify-between"><p class="text-[10px] uppercase tracking-wider text-slate-500">Signaling URL</p><button type="button" onclick={() => copyText(room!.signalingUrl)} title="Copy"><iconify-icon icon={copied ? "mdi:check" : "mdi:content-copy"}></iconify-icon></button></div>
+                <p class="mt-3 break-all font-mono text-xs text-emerald-300">{room.signalingUrl}</p>
+              </div>
+              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                <div class="flex items-center justify-between"><p class="text-[10px] uppercase tracking-wider text-slate-500">Host URL</p><button type="button" onclick={() => copyText(browserHostUrl)} title="Copy"><iconify-icon icon={copied ? "mdi:check" : "mdi:content-copy"}></iconify-icon></button></div>
+                <p class="mt-3 break-all font-mono text-xs text-cyan-300">{browserHostUrl}</p>
+              </div>
+              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                <div class="flex items-center justify-between"><p class="text-[10px] uppercase tracking-wider text-slate-500">Participant URL</p><button type="button" onclick={() => copyText(buildGuestUrl(room!.signalingUrl))} title="Copy"><iconify-icon icon={copied ? "mdi:check" : "mdi:content-copy"}></iconify-icon></button></div>
+                <p class="mt-3 break-all font-mono text-xs text-purple-300">{buildGuestUrl(room.signalingUrl)}</p>
+              </div>
+            </div>
+          </div>
+        {:else}
+          <!-- TAURI: Server instructions -->
+          <div class="flex h-full flex-col items-center justify-center px-4 text-center">
           <div class="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-amber-500/10">
             <iconify-icon icon="mdi:server" class="text-4xl text-amber-400"></iconify-icon>
           </div>
@@ -717,25 +899,66 @@
             <p><span class="mr-2 font-bold text-slate-400">4.</span>Close this app when done. Rooms are ephemeral.</p>
           </div>
         </div>
+        {/if}
+      {:else if isConnecting}
+        <!-- BROWSER: Connecting -->
+        <div class="flex h-full flex-col items-center justify-center px-4 text-center">
+          <div class="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-cyan-500/10">
+            <iconify-icon icon="mdi:sync" class="animate-spin text-4xl text-cyan-400"></iconify-icon>
+          </div>
+          <h3 class="text-xl font-semibold text-slate-200">Connecting...</h3>
+          <p class="mt-2 max-w-md text-sm text-slate-400">
+            Joining the room. This may take a moment.
+          </p>
+        </div>
       {:else if peerRole}
         <!-- BROWSER: Call active -->
         <div class="flex h-full flex-col gap-2">
-          <div class="grid flex-1 gap-3 grid-rows-2 lg:grid-cols-2 lg:grid-rows-1">
-            <div class="relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
+          <div class={`video-grid ${videoGridClass}`}>
+            <div class="video-tile relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group">
               <div class="absolute left-3 top-3 z-10 flex items-center gap-2 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur">
-                <span class="text-xs text-slate-300">{peerRole === "host" ? "You" : "Remote stream"}</span>
-                <span class="rounded {cameraState === 'Running' ? 'bg-emerald-500/30 text-emerald-300' : 'bg-slate-700 text-slate-400'} px-1.5 py-0.5 text-[10px]">{cameraState}</span>
+                <span class="text-xs text-slate-300">You</span>
+                <span class="rounded {screenShareState === 'Running' ? 'bg-purple-500/30 text-purple-300' : cameraState === 'Running' ? 'bg-emerald-500/30 text-emerald-300' : 'bg-slate-700 text-slate-400'} px-1.5 py-0.5 text-[10px]">{screenShareState === 'Running' ? 'Screen' : cameraState}</span>
+              </div>
+              <div class="absolute right-3 top-3 z-10 flex gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+                <button
+                  class="rounded-lg bg-slate-950/70 p-2 text-slate-300 backdrop-blur transition hover:text-white"
+                  type="button" onclick={() => toggleFullscreen(localVideo)}
+                  title="Fullscreen">
+                  <iconify-icon icon="mdi:fullscreen" class="text-sm"></iconify-icon>
+                </button>
               </div>
               <video class="h-full w-full object-cover" autoplay bind:this={localVideo} muted playsinline></video>
             </div>
-            <div class="relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
-              <div class="absolute left-3 top-3 z-10 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur">
-                <span class="text-xs text-slate-300">{peerRole === "host" ? "Guest" : "Host"}</span>
+            {#each guestPeers as guest (guest.id)}
+              <div class="video-tile relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group">
+                <div class="absolute left-3 top-3 z-10 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur">
+                  <span class="text-xs text-slate-300">
+                    {guest.isHost ? "Host" : `Participant ${guest.id.slice(0, 8)}`}
+                  </span>
+                </div>
+                <div class="absolute right-3 top-3 z-10 flex gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+                  <button
+                    class="rounded-lg bg-slate-950/70 p-2 text-slate-300 backdrop-blur transition hover:text-white"
+                    type="button" onclick={() => toggleFullscreen(guest.videoEl)}
+                    title="Fullscreen">
+                    <iconify-icon icon="mdi:fullscreen" class="text-sm"></iconify-icon>
+                  </button>
+                </div>
+                <div class="absolute bottom-3 right-3 z-10 flex flex-col items-center gap-2 rounded-lg bg-slate-950/70 px-2 py-2 opacity-0 backdrop-blur transition-opacity group-hover:opacity-100">
+                  <input
+                    class="volume-slider cursor-pointer accent-cyan-400"
+                    type="range" min="0" max="1" step="0.01"
+                    value={guest.volume}
+                    oninput={(e) => setGuestVolume(guest, parseFloat(e.currentTarget.value))}
+                  />
+                  <iconify-icon icon={guest.volume === 0 ? "mdi:volume-off" : "mdi:volume-high"} class="text-lg text-slate-300"></iconify-icon>
+                </div>
+                <video class="h-full w-full object-cover" autoplay bind:this={guest.videoEl} muted playsinline></video>
+                <audio bind:this={guest.audioEl} autoplay></audio>
               </div>
-              <video class="h-full w-full object-cover" autoplay bind:this={remoteVideo} playsinline></video>
-            </div>
+            {/each}
           </div>
-          <audio bind:this={remoteAudio} autoplay></audio>
         </div>
       {:else}
         <!-- BROWSER: No call -->
@@ -745,12 +968,12 @@
           </div>
           <h3 class="text-xl font-semibold text-slate-200">Join a streaming session</h3>
           <p class="mt-2 max-w-md text-sm text-slate-400">
-            Paste a signaling URL in the sidebar, then click <span class="font-semibold text-cyan-300">Join</span> to watch or <span class="font-semibold text-emerald-300">Host</span> to stream.
+            Paste a signaling URL in the sidebar, then click <span class="font-semibold text-cyan-300">Join</span> to connect. Add <code class="text-cyan-300">?role=host</code> to the URL to stream.
           </p>
           <div class="mt-6 space-y-2 text-xs text-slate-500">
             <p><span class="mr-2 font-bold text-slate-400">1.</span>Get a signaling URL from the host (starts with <code class="text-cyan-300">ws://</code>)</p>
             <p><span class="mr-2 font-bold text-slate-400">2.</span>Paste it in the <span class="font-semibold text-slate-300">Connection</span> field</p>
-            <p><span class="mr-2 font-bold text-slate-400">3.</span>Click <span class="font-semibold text-emerald-300">Host</span> to stream or <span class="font-semibold text-cyan-300">Join</span> to watch</p>
+            <p><span class="mr-2 font-bold text-slate-400">3.</span>Click <span class="font-semibold text-cyan-300">Join</span> to enter the room and share your screen when needed</p>
           </div>
         </div>
       {/if}
