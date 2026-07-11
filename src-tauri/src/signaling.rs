@@ -191,21 +191,6 @@ impl SignalingState {
             .unwrap_or_default()
     }
 
-    fn add_participant(&self, room_id: &str, connection_id: Uuid) {
-        if let Some(room) = self
-            .inner
-            .lock()
-            .expect("signaling state mutex poisoned")
-            .rooms
-            .get_mut(room_id)
-        {
-            room.participants.insert(
-                connection_id,
-                format!("Participant {}", &connection_id.simple().to_string()[..8]),
-            );
-        }
-    }
-
     fn identify_participant(&self, room_id: &str, connection_id: Uuid, payload: &str) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
             return;
@@ -417,8 +402,6 @@ async fn handle_socket(socket: WebSocket, room_id: String, state: SignalingState
     let mut rx = tx.subscribe();
     let (mut sender, mut receiver) = socket.split();
     let peer_id = Uuid::new_v4();
-    state.add_participant(&room_id, peer_id);
-
     let receive_state = state.clone();
     let receive_room_id = room_id.clone();
     let client_peer_id = Arc::new(Mutex::new(None::<String>));
