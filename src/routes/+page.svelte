@@ -42,11 +42,17 @@
     id: string;
     pc: RTCPeerConnection;
     stream: MediaStream;
+    micStream: MediaStream;
+    systemAudioStream: MediaStream;
     connected: boolean;
     isHost: boolean;
     videoEl: HTMLVideoElement | null;
-    audioEl: HTMLAudioElement | null;
-    volume: number;
+    micAudioEl: HTMLAudioElement | null;
+    systemAudioEl: HTMLAudioElement | null;
+    micVolume: number;
+    systemVolume: number;
+    systemAudioSender: RTCRtpSender | null;
+    pendingAudioKinds: Array<"microphone" | "system">;
   }
 
   let guestPeers: GuestPeer[] = [];
@@ -69,6 +75,7 @@
   let screenShareState = "Stopped";
   let selectedScreenQualityId: ScreenQualityPreset["id"] = "balanced";
   let wasCameraOnBeforeShare = false;
+  let screenAudioAvailable = false;
   let screenStream: MediaStream | null = null;
   let webrtcAvailable = true;
   let isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -78,6 +85,7 @@
   let ws: WebSocket | null = null;
   let dataChannel: RTCDataChannel | null = null;
   let localStream: MediaStream | null = null;
+  let microphoneTrack: MediaStreamTrack | null = null;
   let localVideo: HTMLVideoElement | null = null;
   let videoGridClass = "video-grid--one";
 
@@ -88,7 +96,8 @@
 
   onMount(async () => {
     webrtcAvailable = typeof RTCPeerConnection !== "undefined";
-    myPeerId = crypto.randomUUID();
+    myPeerId = sessionStorage.getItem("streaming-open-peer-id") ?? crypto.randomUUID();
+    sessionStorage.setItem("streaming-open-peer-id", myPeerId);
 
     const params = new URLSearchParams(window.location.search);
     const roomUrl = params.get("room");
@@ -202,6 +211,8 @@
     guestPeers = [];
 
     await connectSignaling(signalingUrl);
+    // A refreshed host gets a new peer ID; existing guests use this to negotiate again.
+    sendSignal({ type: "ready", peerId: myPeerId });
     infoMessage = webrtcAvailable
       ? "Host ready. Waiting for guests to join."
       : "Room created (signaling only). Open the room URL in Chrome/Firefox to stream.";
@@ -263,6 +274,9 @@
       if (!peer) return;
 
       peer.connected = pc.connectionState === "connected";
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+        guestPeers = guestPeers.filter((guest) => guest.id !== peerId);
+      }
       guestPeers = guestPeers;
       updatePeerCount();
     };
@@ -272,7 +286,13 @@
 
   function bindGuestOnTrack(guest: GuestPeer) {
     guest.pc.ontrack = (event) => {
-      guest.stream.addTrack(event.track);
+      if (event.track.kind === "audio") {
+        const kind = guest.pendingAudioKinds.shift() ?? "microphone";
+        const target = kind === "system" ? guest.systemAudioStream : guest.micStream;
+        target.addTrack(event.track);
+      } else {
+        guest.stream.addTrack(event.track);
+      }
       guestPeers = guestPeers;
       attachVideoStreams();
     };
@@ -310,8 +330,16 @@
       }
 
       const guestId = message.peerId;
-      if (guestId === myPeerId || guestPeers.find((g) => g.id === guestId)) {
+      if (guestId === myPeerId) {
         return;
+      }
+
+      const existingPeer = guestPeers.find((guest) => guest.id === guestId);
+      if (existingPeer) {
+        if (!existingPeer.isHost) return;
+        // A host refresh keeps its ID and replaces the previous peer connection.
+        existingPeer.pc.close();
+        guestPeers = guestPeers.filter((guest) => guest.id !== guestId);
       }
 
       const pc = createPeerConnectionForGuest(guestId);
@@ -319,15 +347,22 @@
         id: guestId,
         pc,
         stream: new MediaStream(),
+        micStream: new MediaStream(),
+        systemAudioStream: new MediaStream(),
         connected: false,
         isHost: false,
-        volume: 1,
+        micVolume: 1,
+        systemVolume: 1,
+        systemAudioSender: null,
+        pendingAudioKinds: [],
         videoEl: null,
-        audioEl: null,
+        micAudioEl: null,
+        systemAudioEl: null,
       };
       bindGuestOnTrack(guest);
       guestPeers = [...guestPeers, guest];
       addLocalTracksToPeerConnection(pc);
+      addCurrentSystemAudioToPeer(guest, false);
       updatePeerCount();
 
       infoMessage = `Participant ${guestId.slice(0, 8)} joined. Connecting...`;
@@ -346,6 +381,16 @@
       return;
     }
 
+    if (message.type === "participant-left") {
+      const guest = guestPeers.find((peer) => peer.id === message.peerId);
+      if (guest) {
+        guest.pc.close();
+        guestPeers = guestPeers.filter((peer) => peer.id !== message.peerId);
+        updatePeerCount();
+      }
+      return;
+    }
+
     if (message.type === "offer") {
       if (message.targetPeerId !== myPeerId) return;
 
@@ -360,11 +405,17 @@
           id: message.peerId,
           pc,
           stream: new MediaStream(),
+          micStream: new MediaStream(),
+          systemAudioStream: new MediaStream(),
           connected: false,
           isHost: message.isHost === true,
-          volume: 1,
+          micVolume: 1,
+          systemVolume: 1,
+          systemAudioSender: null,
+          pendingAudioKinds: [],
           videoEl: null,
-          audioEl: null,
+          micAudioEl: null,
+          systemAudioEl: null,
         };
         bindGuestOnTrack(guest);
         guestPeers = [...guestPeers, guest];
@@ -374,6 +425,7 @@
       }
 
       addLocalTracksToPeerConnection(guest.pc);
+      addCurrentSystemAudioToPeer(guest, false);
       await guest.pc.setRemoteDescription(message.description);
       const answer = await guest.pc.createAnswer();
       await guest.pc.setLocalDescription(answer);
@@ -403,6 +455,12 @@
       if (guest) {
         await guest.pc.addIceCandidate(message.candidate);
       }
+    }
+
+    if (message.type === "audio-kind") {
+      if (message.targetPeerId !== myPeerId) return;
+      const guest = guestPeers.find((peer) => peer.id === message.peerId);
+      if (guest) guest.pendingAudioKinds.push(message.audioKind);
     }
   }
 
@@ -435,6 +493,7 @@
       });
       cameraState = "Running";
       micState = "Active";
+      microphoneTrack = localStream.getAudioTracks()[0] ?? null;
       attachVideoStreams();
       addLocalTracksToAllPeers();
 
@@ -454,9 +513,7 @@
   }
 
   function toggleMic() {
-    if (!localStream) return;
-
-    const audioTracks = localStream.getAudioTracks();
+    const audioTracks = microphoneTrack ? [microphoneTrack] : localStream?.getAudioTracks() ?? [];
 
     if (audioTracks.length === 0) {
       micState = "No track";
@@ -471,6 +528,7 @@
   function stopCamera() {
     localStream?.getTracks().forEach((track) => track.stop());
     localStream = null;
+    microphoneTrack = null;
     cameraState = "Stopped";
     micState = "Stopped";
     for (const guest of guestPeers) {
@@ -502,25 +560,38 @@
           height: { ideal: quality.height },
           frameRate: { ideal: quality.fps },
         },
-        audio: false,
+        audio: true,
       });
 
       screenShareState = "Running";
 
       const screenTrack = screenStream.getVideoTracks()[0];
       screenTrack.onended = () => stopScreenShare();
+      const screenAudioTrack = screenStream.getAudioTracks()[0];
+      screenAudioAvailable = Boolean(screenAudioTrack);
+      if (screenAudioTrack) {
+        screenAudioTrack.onended = () => {
+          screenAudioAvailable = false;
+          removeSystemAudioTracksFromAllPeers();
+        };
+      }
 
       wasCameraOnBeforeShare = cameraState === "Running";
 
       if (localStream) {
-        localStream.getVideoTracks().forEach((t) => t.stop());
+        localStream.getVideoTracks().forEach((track) => track.stop());
       }
 
       localStream = screenStream;
       attachVideoStreams();
       sendVideoTrackToAllPeers(screenTrack);
+      if (screenAudioTrack) {
+        sendSystemAudioTrackToAllPeers(screenAudioTrack);
+      }
       await applyScreenQuality(screenTrack, quality);
-      infoMessage = `Screen sharing at ${quality.width}x${quality.height}, ${quality.fps} FPS, ${formatBitrate(quality.bitrate)}.`;
+      infoMessage = screenAudioTrack
+        ? `Screen and system audio sharing at ${quality.width}x${quality.height}, ${quality.fps} FPS, ${formatBitrate(quality.bitrate)}.`
+        : "Screen sharing started without system audio. Choose a source that offers audio to share it.";
     } catch (error) {
       screenShareState = "Stopped";
       if (String(error) !== "AbortError") {
@@ -535,11 +606,15 @@
     screenStream.getTracks().forEach((track) => track.stop());
     screenStream = null;
     localStream = null;
+    microphoneTrack = null;
     screenShareState = "Stopped";
+    screenAudioAvailable = false;
     attachVideoStreams();
 
     if (wasCameraOnBeforeShare) {
       startCamera();
+    } else {
+      removeSystemAudioTracksFromAllPeers();
     }
   }
 
@@ -550,6 +625,43 @@
         sender.replaceTrack(track).catch(() => {});
       } else if (localStream) {
         guest.pc.addTrack(track, localStream);
+        renegotiate(guest);
+      }
+    }
+  }
+
+  function sendSystemAudioTrackToAllPeers(track: MediaStreamTrack) {
+    for (const guest of guestPeers) {
+      sendSignal({
+        type: "audio-kind",
+        peerId: myPeerId,
+        targetPeerId: guest.id,
+        audioKind: "system",
+      });
+      addSystemAudioTrackToPeer(guest, track);
+    }
+  }
+
+  function addCurrentSystemAudioToPeer(guest: GuestPeer, renegotiateAfterAdd: boolean) {
+    const track = screenStream?.getAudioTracks()[0];
+    if (track) addSystemAudioTrackToPeer(guest, track, renegotiateAfterAdd);
+  }
+
+  function addSystemAudioTrackToPeer(
+    guest: GuestPeer,
+    track: MediaStreamTrack,
+    renegotiateAfterAdd = true,
+  ) {
+    if (guest.systemAudioSender) return;
+    guest.systemAudioSender = guest.pc.addTrack(track, new MediaStream([track]));
+    if (renegotiateAfterAdd) renegotiate(guest);
+  }
+
+  function removeSystemAudioTracksFromAllPeers() {
+    for (const guest of guestPeers) {
+      if (guest.systemAudioSender) {
+        guest.pc.removeTrack(guest.systemAudioSender);
+        guest.systemAudioSender = null;
         renegotiate(guest);
       }
     }
@@ -627,7 +739,13 @@
 
   function addLocalTracksToPeerConnection(pc: RTCPeerConnection) {
     if (!localStream) return;
-    for (const track of localStream.getTracks()) {
+    const tracks = localStream
+      .getTracks()
+      .filter((track) => !(screenShareState === "Running" && track.kind === "audio"));
+    if (microphoneTrack && !tracks.some((track) => track.id === microphoneTrack?.id)) {
+      tracks.push(microphoneTrack);
+    }
+    for (const track of tracks) {
       const sender = pc.getSenders().find((item) => item.track?.kind === track.kind);
       if (sender) {
         sender.replaceTrack(track).catch(() => {});
@@ -641,7 +759,8 @@
     if (localVideo) localVideo.srcObject = localStream;
     for (const guest of guestPeers) {
       if (guest.videoEl) guest.videoEl.srcObject = guest.stream;
-      if (guest.audioEl) guest.audioEl.srcObject = guest.stream;
+      if (guest.micAudioEl) guest.micAudioEl.srcObject = guest.micStream;
+      if (guest.systemAudioEl) guest.systemAudioEl.srcObject = guest.systemAudioStream;
     }
   }
 
@@ -654,9 +773,14 @@
     }
   }
 
-  function setGuestVolume(guest: GuestPeer, volume: number) {
-    guest.volume = volume;
-    if (guest.audioEl) guest.audioEl.volume = volume;
+  function setGuestVolume(guest: GuestPeer, source: "mic" | "system", volume: number) {
+    if (source === "mic") {
+      guest.micVolume = volume;
+      if (guest.micAudioEl) guest.micAudioEl.volume = volume;
+    } else {
+      guest.systemVolume = volume;
+      if (guest.systemAudioEl) guest.systemAudioEl.volume = volume;
+    }
   }
 
   function getVideoGridClass(participantCount: number) {
@@ -691,6 +815,7 @@
     peerRole = null;
     isConnecting = false;
     screenShareState = "Stopped";
+    screenAudioAvailable = false;
     cameraState = "Stopped";
     micState = "Stopped";
     signalingConnectionState = "Disconnected";
@@ -1008,7 +1133,7 @@
             <div class="video-tile relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group">
               <div class="absolute left-3 top-3 z-10 flex items-center gap-2 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur">
                 <span class="text-xs text-slate-300">You</span>
-                <span class="rounded {screenShareState === 'Running' ? 'bg-purple-500/30 text-purple-300' : cameraState === 'Running' ? 'bg-emerald-500/30 text-emerald-300' : 'bg-slate-700 text-slate-400'} px-1.5 py-0.5 text-[10px]">{screenShareState === 'Running' ? 'Screen' : cameraState}</span>
+                <span class="rounded {screenShareState === 'Running' ? 'bg-purple-500/30 text-purple-300' : cameraState === 'Running' ? 'bg-emerald-500/30 text-emerald-300' : 'bg-slate-700 text-slate-400'} px-1.5 py-0.5 text-[10px]">{screenShareState === 'Running' ? screenAudioAvailable ? 'Screen + audio' : 'Screen' : cameraState}</span>
               </div>
               <div class="absolute right-3 top-3 z-10 flex gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
                 <button
@@ -1035,17 +1160,31 @@
                     <iconify-icon icon="mdi:fullscreen" class="text-sm"></iconify-icon>
                   </button>
                 </div>
-                <div class="absolute bottom-3 right-3 z-10 flex flex-col items-center gap-2 rounded-lg bg-slate-950/70 px-2 py-2 opacity-0 backdrop-blur transition-opacity group-hover:opacity-100">
+                <div class="absolute bottom-3 right-3 z-10 flex gap-2 rounded-lg bg-slate-950/70 px-2 py-2 {guest.systemAudioStream.getAudioTracks().length > 0 ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} backdrop-blur transition-opacity">
+                  <div class="flex flex-col items-center gap-2">
                   <input
                     class="volume-slider cursor-pointer accent-cyan-400"
                     type="range" min="0" max="1" step="0.01"
-                    value={guest.volume}
-                    oninput={(e) => setGuestVolume(guest, parseFloat(e.currentTarget.value))}
+                    value={guest.micVolume}
+                    oninput={(e) => setGuestVolume(guest, "mic", parseFloat(e.currentTarget.value))}
                   />
-                  <iconify-icon icon={guest.volume === 0 ? "mdi:volume-off" : "mdi:volume-high"} class="text-lg text-slate-300"></iconify-icon>
+                  <iconify-icon icon={guest.micVolume === 0 ? "mdi:microphone-off" : "mdi:microphone"} class="text-lg text-slate-300"></iconify-icon>
+                  </div>
+                  {#if guest.systemAudioStream.getAudioTracks().length > 0}
+                    <div class="flex flex-col items-center gap-2 border-l border-slate-700 pl-2">
+                      <input
+                        class="volume-slider cursor-pointer accent-purple-400"
+                        type="range" min="0" max="1" step="0.01"
+                        value={guest.systemVolume}
+                        oninput={(e) => setGuestVolume(guest, "system", parseFloat(e.currentTarget.value))}
+                      />
+                      <iconify-icon icon={guest.systemVolume === 0 ? "mdi:volume-off" : "mdi:volume-high"} class="text-lg text-purple-300"></iconify-icon>
+                    </div>
+                  {/if}
                 </div>
                 <video class="h-full w-full object-cover" autoplay bind:this={guest.videoEl} muted playsinline></video>
-                <audio bind:this={guest.audioEl} autoplay></audio>
+                <audio bind:this={guest.micAudioEl} autoplay></audio>
+                <audio bind:this={guest.systemAudioEl} autoplay></audio>
               </div>
             {/each}
           </div>

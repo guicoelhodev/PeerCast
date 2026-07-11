@@ -562,7 +562,7 @@ Video call with audio works.
 
 Complete (2026-07-10).
 
-Screen sharing is available to every participant through `getDisplayMedia()`. It replaces the outgoing camera video track, restores the camera after sharing ends when applicable, and is covered by the multi-participant signaling flow.
+Screen sharing is available to every participant through `getDisplayMedia()`. It replaces the outgoing camera video track, sends system audio in a separate track when the chosen source provides it, keeps microphone audio independent, restores the camera after sharing ends when applicable, and is covered by the multi-participant signaling flow.
 
 ## Goal
 

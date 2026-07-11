@@ -66,6 +66,7 @@ All MVP features through Phase 7 are implemented, tested and build-validated. Ro
 - Handles picker cancellation and screen capture ending externally.
 - Shows local and remote screen streams in the participant grid.
 - Uses WebRTC renegotiation when a peer has no existing video sender.
+- Requests system audio with the selected display source and publishes it as a separate track when the browser provides one; microphone audio remains independent.
 
 ### Phase 7 — Manual Streaming Quality
 - Added presets for 720p30, 1080p30, 1080p60, 1440p60 and experimental 4K30.
