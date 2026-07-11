@@ -103,6 +103,7 @@
     displayName: string;
     isMuted: boolean;
     isSpeaking: boolean;
+    videoState: "camera" | "screen" | "off";
   }
 
   let guestPeers: GuestPeer[] = [];
@@ -321,6 +322,7 @@
 
     try {
       await connectSignaling(signalingUrl);
+      await startMicrophone();
       // A refreshed host gets a new peer ID; existing guests use this to negotiate again.
       sendReadySignal();
       infoMessage = webrtcAvailable
@@ -371,6 +373,7 @@
       await connectSignaling(joinUrl.trim());
 
       if (webrtcAvailable) {
+        await startMicrophone();
         sendReadySignal();
         infoMessage = "Joined the room. Connecting to participants.";
       } else {
@@ -421,6 +424,12 @@
         target.addTrack(event.track);
       } else {
         guest.stream.addTrack(event.track);
+        if (guest.videoState === "off") guest.videoState = "camera";
+        event.track.onended = () => {
+          guest.stream.removeTrack(event.track);
+          guestPeers = guestPeers;
+          attachVideoStreams();
+        };
       }
       guestPeers = guestPeers;
       attachVideoStreams();
@@ -645,6 +654,7 @@
         displayName: message.displayName ?? "Participant",
         isMuted: message.microphoneMuted ?? false,
         isSpeaking: false,
+        videoState: "off",
         videoEl: null,
         micAudioEl: null,
         systemAudioEl: null,
@@ -665,7 +675,7 @@
         targetPeerId: guestId,
         isHost: peerRole === "host",
         displayName,
-        microphoneMuted: micState === "Muted",
+        microphoneMuted: micState !== "Active",
         description: offer,
       });
       infoMessage = `Offer sent to ${guest.displayName}.`;
@@ -714,6 +724,7 @@
           displayName: message.displayName ?? "Participant",
           isMuted: message.microphoneMuted ?? false,
           isSpeaking: false,
+          videoState: "off",
           videoEl: null,
           micAudioEl: null,
           systemAudioEl: null,
@@ -737,7 +748,7 @@
         peerId: myPeerId,
         targetPeerId: message.peerId,
         displayName,
-        microphoneMuted: micState === "Muted",
+        microphoneMuted: micState !== "Active",
         description: answer,
       });
       infoMessage = "Answer sent. Waiting for peer connection.";
@@ -779,6 +790,22 @@
         guestPeers = guestPeers;
       }
     }
+
+    if (message.type === "video-state") {
+      if (message.peerId === myPeerId) return;
+      const guest = guestPeers.find((peer) => peer.id === message.peerId);
+      if (!guest) return;
+
+      guest.videoState = message.videoState;
+      if (message.videoState === "off") {
+        for (const track of guest.stream.getVideoTracks()) {
+          guest.stream.removeTrack(track);
+        }
+        if (guest.videoEl) guest.videoEl.srcObject = null;
+      }
+      guestPeers = guestPeers;
+      attachVideoStreams();
+    }
   }
 
   function sendSignal(message: SignalMessage) {
@@ -792,7 +819,7 @@
       type: "ready",
       peerId: myPeerId,
       displayName,
-      microphoneMuted: micState === "Muted",
+      microphoneMuted: micState !== "Active",
     });
   }
 
@@ -809,7 +836,7 @@
     errorMessage = "";
 
     if (screenShareState === "Running") {
-      stopScreenShare();
+      await stopScreenShare();
     }
 
     try {
@@ -824,6 +851,7 @@
         // Camera tracks need an offer even while the connection state is still settling.
         await renegotiate(guest);
       }
+      sendVideoState("camera");
     } catch (error) {
       cameraState = "Error";
       const hint =
@@ -874,25 +902,20 @@
     });
   }
 
-  function stopCamera() {
+  async function stopCamera() {
     localStream?.getVideoTracks().forEach((track) => track.stop());
     localStream = null;
     cameraState = "Stopped";
-    for (const guest of guestPeers) {
-      for (const sender of guest.pc.getSenders()) {
-        if (sender.track?.kind === "video") {
-          sender.replaceTrack(null).catch(() => {});
-        }
-      }
-    }
+    sendVideoState("off");
+    await removeVideoTracksFromAllPeers();
     attachVideoStreams();
   }
 
-  function toggleCamera() {
+  async function toggleCamera() {
     if (cameraState === "Running") {
-      stopCamera();
+      await stopCamera();
     } else {
-      startCamera();
+      await startCamera();
     }
   }
 
@@ -932,6 +955,7 @@
       localStream = screenStream;
       attachVideoStreams();
       sendVideoTrackToAllPeers(screenTrack);
+      sendVideoState("screen");
       if (screenAudioTrack) {
         sendSystemAudioTrackToAllPeers(screenAudioTrack);
       }
@@ -947,7 +971,7 @@
     }
   }
 
-  function stopScreenShare() {
+  async function stopScreenShare() {
     if (!screenStream) return;
 
     screenStream.getTracks().forEach((track) => track.stop());
@@ -955,13 +979,32 @@
     localStream = null;
     screenShareState = "Stopped";
     screenAudioAvailable = false;
+    sendVideoState("off");
     attachVideoStreams();
+    await removeVideoTracksFromAllPeers();
 
     if (wasCameraOnBeforeShare) {
-      startCamera();
+      await startCamera();
     } else {
       removeSystemAudioTracksFromAllPeers();
     }
+  }
+
+  async function removeVideoTracksFromAllPeers() {
+    await Promise.all(
+      guestPeers.map(async (guest) => {
+        for (const sender of guest.pc.getSenders()) {
+          if (sender.track?.kind === "video") {
+            guest.pc.removeTrack(sender);
+          }
+        }
+        await renegotiate(guest);
+      }),
+    );
+  }
+
+  function sendVideoState(videoState: "camera" | "screen" | "off") {
+    sendSignal({ type: "video-state", peerId: myPeerId, videoState });
   }
 
   function sendVideoTrackToAllPeers(track: MediaStreamTrack) {
@@ -1969,7 +2012,7 @@
                     </div>
                   {/if}
                 </div>
-                {#if !hasActiveVideo(guest.stream)}
+                {#if guest.videoState === "off" || !hasActiveVideo(guest.stream)}
                   <div
                     class="absolute inset-0 flex items-center justify-center"
                     aria-label={`${guest.displayName} avatar`}
@@ -1982,7 +2025,10 @@
                   </div>
                 {/if}
                 <video
-                  class="h-full w-full object-cover"
+                  class="h-full w-full object-cover {guest.videoState ===
+                    'off' || !hasActiveVideo(guest.stream)
+                    ? 'invisible'
+                    : ''}"
                   autoplay
                   bind:this={guest.videoEl}
                   muted

@@ -136,6 +136,27 @@ test("1 host + 3 guests join and connect via WebRTC", async ({ browser }) => {
     )
     .toBe(true);
 
+  // Stopping video must explicitly clear the remote frame and reveal the avatar.
+  await guestPages[0].getByTitle("Stop camera").click();
+  await expect(hostPage.getByLabel("Guest 1 avatar")).toBeVisible();
+  await expect
+    .poll(() =>
+      hostPage
+        .getByLabel("Guest 1 avatar")
+        .locator("..")
+        .locator("video")
+        .evaluate((element) => {
+          const video = element as HTMLVideoElement;
+          const stream = video.srcObject;
+          return (
+            video.classList.contains("invisible") &&
+            (!(stream instanceof MediaStream) ||
+              stream.getVideoTracks().length === 0)
+          );
+        }),
+    )
+    .toBe(true);
+
   // A host refresh creates a new peer ID and must trigger guests to renegotiate.
   await hostPage.reload();
   await expect(

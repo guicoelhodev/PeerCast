@@ -40,6 +40,11 @@ export type SignalMessage =
     }
   | { type: "microphone-state"; peerId: string; microphoneMuted: boolean }
   | {
+      type: "video-state";
+      peerId: string;
+      videoState: "camera" | "screen" | "off";
+    }
+  | {
       type: "chat";
       peerId: string;
       messageId: string;
@@ -146,6 +151,12 @@ export function parseSignalMessage(data: string): SignalMessage | null {
               peerId,
               microphoneMuted: value.microphoneMuted,
             }
+          : null;
+      case "video-state":
+        return value.videoState === "camera" ||
+          value.videoState === "screen" ||
+          value.videoState === "off"
+          ? { type: "video-state", peerId, videoState: value.videoState }
           : null;
       case "chat":
         if (
