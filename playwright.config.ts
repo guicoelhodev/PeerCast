@@ -23,6 +23,14 @@ export default defineConfig({
           ],
         },
       },
+      testMatch: /signaling\.spec\.ts/,
+    },
+    {
+      name: "responsive-mobile",
+      testMatch: /responsive\.spec\.ts/,
+      use: {
+        ...devices["Pixel 7"],
+      },
     },
   ],
   webServer: [

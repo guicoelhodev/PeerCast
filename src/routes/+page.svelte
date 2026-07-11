@@ -125,6 +125,7 @@
   let chatMessages: ChatMessage[] = [];
   let chatDraft = "";
   let isChatOpen = false;
+  let isSidebarOpen = false;
   let unreadChatMessages = 0;
   let chatHistory: HTMLDivElement | null = null;
   let chatInput: HTMLTextAreaElement | null = null;
@@ -521,6 +522,14 @@
       unreadChatMessages = 0;
       requestAnimationFrame(() => chatInput?.focus());
     }
+  }
+
+  function toggleSidebar() {
+    isSidebarOpen = !isSidebarOpen;
+  }
+
+  function closeSidebar() {
+    isSidebarOpen = false;
   }
 
   function sendChatMessage() {
@@ -1264,13 +1273,37 @@
     chatDraft = "";
     unreadChatMessages = 0;
     isChatOpen = false;
+    isSidebarOpen = false;
   }
 </script>
 
-<main class="flex h-screen overflow-hidden bg-slate-950 text-slate-100">
+<svelte:window
+  onkeydown={(event) => {
+    if (event.key === "Escape") {
+      isChatOpen = false;
+      isSidebarOpen = false;
+    }
+  }}
+/>
+
+<main
+  class="app-shell flex min-h-dvh overflow-hidden bg-slate-950 text-slate-100"
+>
+  {#if isSidebarOpen}
+    <button
+      class="sidebar-backdrop"
+      type="button"
+      aria-label="Close navigation"
+      onclick={closeSidebar}
+    ></button>
+  {/if}
+
   <!-- LEFT SIDEBAR -->
   <aside
-    class="flex w-72 shrink-0 flex-col border-r border-slate-800 bg-slate-900/60"
+    id="app-sidebar"
+    class:sidebar-open={isSidebarOpen}
+    class="app-sidebar flex w-72 shrink-0 flex-col border-r border-slate-800 bg-slate-900/60"
+    aria-label="Application navigation"
   >
     <!-- App header -->
     <div
@@ -1343,7 +1376,10 @@
             class="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-2.5 text-sm font-semibold text-slate-950 shadow-lg shadow-amber-500/25 transition hover:bg-amber-400 disabled:opacity-60"
             type="button"
             disabled={isCreatingRoom}
-            onclick={createLocalRoom}
+            onclick={() => {
+              createLocalRoom();
+              closeSidebar();
+            }}
           >
             <iconify-icon icon="mdi:plus" class="text-base"></iconify-icon>
             {isCreatingRoom ? "Creating..." : "New Room"}
@@ -1437,7 +1473,10 @@
           <button
             class="flex w-full items-center justify-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 shadow-lg shadow-cyan-500/25 transition hover:bg-cyan-400"
             type="button"
-            onclick={joinRoom}
+            onclick={() => {
+              joinRoom();
+              closeSidebar();
+            }}
           >
             <iconify-icon icon="mdi:login" class="text-sm"></iconify-icon>
             Join
@@ -1499,7 +1538,7 @@
             </p>
             <div class="flex gap-2">
               <button
-                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {cameraState ===
+                class="flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-lg border {cameraState ===
                 'Running'
                   ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
                   : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-emerald-500 hover:text-emerald-300"
@@ -1517,7 +1556,7 @@
                 ></iconify-icon>
               </button>
               <button
-                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {micState ===
+                class="flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-lg border {micState ===
                 'Muted'
                   ? 'border-red-500/50 bg-red-500/10 text-red-300'
                   : micState === 'Active'
@@ -1539,7 +1578,7 @@
                 ></iconify-icon>
               </button>
               <button
-                class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border {screenShareState ===
+                class="flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-lg border {screenShareState ===
                 'Running'
                   ? 'border-purple-500/50 bg-purple-500/10 text-purple-300'
                   : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-purple-500 hover:text-purple-300"
@@ -1638,10 +1677,23 @@
   </aside>
 
   <!-- MAIN CONTENT -->
-  <div class="flex flex-1 flex-col overflow-hidden">
+  <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
     <div
-      class="flex h-12 shrink-0 items-center gap-3 border-b border-slate-800 bg-slate-900/40 px-4"
+      class="app-header flex h-12 shrink-0 items-center gap-3 border-b border-slate-800 bg-slate-900/40 px-4"
     >
+      <button
+        class="mobile-menu-button rounded-lg border border-slate-700 p-2 text-slate-300 transition hover:border-slate-500 hover:text-white"
+        type="button"
+        onclick={toggleSidebar}
+        aria-label={isSidebarOpen ? "Close navigation" : "Open navigation"}
+        aria-expanded={isSidebarOpen}
+        aria-controls="app-sidebar"
+      >
+        <iconify-icon
+          icon={isSidebarOpen ? "mdi:close" : "mdi:menu"}
+          class="text-base"
+        ></iconify-icon>
+      </button>
       <h2 class="text-sm font-semibold text-slate-200">
         {#if isTauri}
           Signaling Server
@@ -1682,7 +1734,7 @@
       {/if}
     </div>
 
-    <div class="flex-1 overflow-y-auto p-4">
+    <div class="main-scroll flex-1 overflow-y-auto p-4">
       {#if isTauri}
         {#if room}
           <div class="mx-auto flex h-full w-full max-w-5xl flex-col gap-5 py-4">
@@ -1866,7 +1918,7 @@
         </div>
       {:else if peerRole}
         <!-- BROWSER: Call active -->
-        <div class="flex h-full min-h-0 gap-3">
+        <div class="call-layout flex h-full min-h-0 gap-3">
           <div class={`video-grid ${videoGridClass}`}>
             <div
               class="video-tile relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group"
@@ -2049,7 +2101,7 @@
           </div>
           {#if isChatOpen}
             <section
-              class="flex w-80 shrink-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/80"
+              class="chat-panel flex w-80 shrink-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/80"
               aria-label="Room chat"
             >
               <header
