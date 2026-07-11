@@ -2,11 +2,11 @@
 
 ## Current Phase
 
-Phase 5 (complete) — Moving to Phase 6
+Phase 7 (complete) — Ready for Phase 8
 
 ## Status
 
-All MVP features through Phase 5 are implemented, tested and build-validated. Multi-guest support added beyond original MVP scope. E2E test suite passes with 1 host + 3 guests.
+All MVP features through Phase 7 are implemented, tested and build-validated. Rooms use a peer-to-peer mesh: host and guests can publish camera, microphone and screen media. Screen sharing includes quality presets available while sharing. E2E coverage validates 1 host + 3 guests and guest-camera delivery to the host.
 
 ## Completed
 
@@ -31,33 +31,47 @@ All MVP features through Phase 5 are implemented, tested and build-validated. Mu
 - Added peer-scoped relay behavior (no self-echo).
 - Added `src-tauri/src/network.rs` for local IP discovery.
 - Started the signaling server from the Tauri backend during app setup.
-- Added Tauri commands: `signaling_status`, `create_room`, `stop_room`.
+- Added Tauri commands: `signaling_status`, `create_room`, `stop_room`, `room_participants`.
 - Selected default local signaling port `17777`.
 - Updated landing UI to show signaling status, local endpoint and room WebSocket URL.
 - Runtime-validated the embedded WebSocket relay with two Node WebSocket clients.
 - Added standalone `signal-server` binary for E2E testing.
 
 ### Phase 3 — WebRTC Peer Connection
-- Added typed frontend signaling protocol with `peerId` routing for multi-peer support.
-- Implemented host/guest peer connection flow over embedded WebSocket signaling.
-- Multi-guest support: host creates one `RTCPeerConnection` per guest, keyed by `peerId`.
-- Auto-accept guests (removed accept/reject UI).
-- Broadcast signaling server routes all messages to all clients; `peerId` filtering in frontend.
+- Added typed frontend signaling protocol with source and target peer IDs for multi-peer routing.
+- Implemented a room mesh over embedded WebSocket signaling: every existing participant connects to a new participant.
+- Auto-accept participants (removed accept/reject UI).
+- Broadcast signaling server routes all messages to all clients; clients filter target peer IDs locally.
 - Connection state tracked per-guest, shown as peer count in UI.
 - Runtime-tested with 1 host + 3 guests via Playwright E2E test.
 
 ### Phase 4 — Camera Video
 - Added camera capture with `getUserMedia({ video: true, audio: true })`.
 - Added local camera preview in video grid.
-- Wired local camera tracks into all host peer connections.
-- Dynamic video grid: 1 col (mobile), 2 cols (sm), 3 cols (lg).
-- Guest receives remote host stream without sending own camera (streamer→viewer model).
+- Wired local camera tracks into every peer connection, for hosts and guests.
+- Camera start always renegotiates existing connections, including connections whose state is still settling.
+- Dynamic video grid: `1x1` for one participant, `1x2` for two, `2x2` for three or four, and `3x3` for five or more.
 
 ### Phase 5 — Microphone Audio
 - Microphone audio captured alongside camera.
 - Mic mute/unmute toggle via `track.enabled`.
 - Hidden `<audio>` elements per guest peer for remote audio playback.
 - Mic state display in devices panel.
+- Active and muted microphone controls have distinct visual states.
+- Per-participant volume is a vertical control in the lower-right video overlay.
+
+### Phase 6 — Screen Sharing
+- Added `getDisplayMedia()` screen capture for every participant, not only the host.
+- Replaces the outgoing camera video track while sharing and restores the camera when sharing stops.
+- Handles picker cancellation and screen capture ending externally.
+- Shows local and remote screen streams in the participant grid.
+- Uses WebRTC renegotiation when a peer has no existing video sender.
+
+### Phase 7 — Manual Streaming Quality
+- Added presets for 720p30, 1080p30, 1080p60, 1440p60 and experimental 4K30.
+- Applies ideal capture constraints for resolution and frame rate before screen sharing.
+- Attempts live updates through track constraints and `RTCRtpSender.setParameters()` for bitrate and frame rate.
+- Shows whether a selection applies to the next share or is being updated live.
 
 ### UX Improvements (partial Phase 9)
 - Single "Join" button with auto-detect: checks `role=host` in URL.
@@ -66,7 +80,8 @@ All MVP features through Phase 5 are implemented, tested and build-validated. Mu
 - Guest stream URL box in Tauri view (without `role=host`).
 - "Stop Room" button in Tauri view to disconnect all guests.
 - Loading state (`isConnecting`) with spinner during connection.
-- Host header shows viewer count.
+- Room header shows connected participant count.
+- Tauri room dashboard now displays room URLs and a periodically refreshed list of connected participants.
 
 ## In Progress
 
@@ -74,8 +89,6 @@ All MVP features through Phase 5 are implemented, tested and build-validated. Mu
 
 ## Remaining
 
-- Phase 6: Screen sharing.
-- Phase 7: Manual quality selection.
 - Phase 8: Stream statistics.
 - Phase 9: Remaining UX (device selectors, settings page, keyboard shortcuts).
 - Phase 10: Stability and recovery (disconnect handling, ICE restart, memory cleanup).
@@ -83,15 +96,15 @@ All MVP features through Phase 5 are implemented, tested and build-validated. Mu
 
 ## Last Completed Task
 
-Multi-guest WebRTC support with auto-accept, `peerId` routing, dynamic video grid, and E2E test coverage (1 host + 3 guests verified).
+Manual screen-share quality selection with live presets.
 
 ## Current Task
 
-None — ready to start Phase 6.
+None — Phase 7 is complete.
 
 ## Next Task
 
-Phase 6: Screen sharing via `getDisplayMedia()`.
+Phase 8: Stream statistics and network feedback.
 
 ## Known Issues
 
@@ -109,15 +122,17 @@ Phase 6: Screen sharing via `getDisplayMedia()`.
 - Rust handles signaling, room state, IP discovery via Tauri commands.
 - Signaling rooms are in-memory, ephemeral. No persistence.
 - WebSocket broadcasting with frontend-side `peerId` routing for multi-peer.
-- Multi-guest: host creates one `RTCPeerConnection` per guest. Guests receive-only (no camera upload).
+- Multi-participant mesh: every participant has one `RTCPeerConnection` per other participant and can publish media.
 - Auto-accept: no accept/reject flow; guests join transparently.
 - Camera and microphone captured together via `getUserMedia`.
 
 ## Technical Debt
 
 - Frontend signaling protocol (`src/lib/signaling-protocol.ts`) tightly coupled to Svelte page.
-- No renegotiation queue for media changes.
-- `startCamera` re-sends offers to all connected guests (could be optimized).
+- No renegotiation queue or perfect-negotiation collision handling for simultaneous media changes.
+- Mesh bandwidth grows with the number of participants and is not suitable for large rooms.
+- Participant identity is an ephemeral peer-ID prefix; there are no user accounts or display names.
+- WebViews can ignore capture constraints or sender bitrate parameters; the selected quality is a target, not a guarantee.
 - `sendDataPing` is a no-op in multi-guest mode (data channel removed).
 
 ## Blockers
@@ -137,13 +152,13 @@ Phase 6: Screen sharing via `getDisplayMedia()`.
 - `pnpm format:check` passed.
 - `cargo check` passed in `src-tauri`.
 - `cargo fmt --check` passed in `src-tauri`.
-- E2E test: 1 host + 3 guests establish WebRTC connections (Playwright, ~6s).
+- E2E test: 1 host + 3 guests establish WebRTC connections, and a guest camera track reaches the host (Playwright).
 
 ## Resume Instructions
 
 Read this file before making changes.
-Continue from Phase 6 (screen sharing).
-The app supports multi-guest streaming: host with camera/audio, guests view-only.
+Continue from Phase 8 (stream statistics and network feedback).
+The app supports a multi-participant mesh: every participant can use camera, microphone and screen sharing.
 All prior phases are complete and tested. Do not restart completed work.
 
 Update this file before ending the session.

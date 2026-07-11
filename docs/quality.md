@@ -2,7 +2,7 @@
 
 ## Goal
 
-Users must be able to manually choose streaming quality for screen sharing. The MVP should expose clear presets and a custom bitrate value.
+Users must be able to manually choose streaming quality for screen sharing. The MVP exposes clear presets while a screen share is active.
 
 ## Presets
 

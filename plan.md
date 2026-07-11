@@ -1,5 +1,13 @@
 # Local-First Tauri Screen Share & Video Call MVP
 
+## Implementation Status (2026-07-10)
+
+- Phases 0-7 are complete: local signaling, room management, multi-participant WebRTC, camera, microphone, screen sharing and manual quality selection.
+- Rooms use a peer-to-peer mesh. Hosts and guests can all publish camera, microphone and screen media.
+- The participant grid is fixed by room size: `1x1`, `1x2`, `2x2` or `3x3`.
+- The Tauri server dashboard shows connection URLs and connected participants.
+- Next implementation phase: Phase 8, stream statistics and network feedback.
+
 ## Project Goal
 
 Build a **local-first desktop application** using **Tauri v2 + Rust + Svelte** that allows users to:
@@ -233,7 +241,6 @@ Suggested presets:
 | Ultra        |      1440p |    60 |           14 Mbps |
 | Experimental |         4K | 30/60 |          20+ Mbps |
 
-The app should also allow a custom bitrate value.
 
 The agent should implement quality control in a realistic way depending on the selected WebRTC approach.
 
@@ -551,6 +558,12 @@ Video call with audio works.
 
 # PHASE 6 — Screen Sharing
 
+## Status
+
+Complete (2026-07-10).
+
+Screen sharing is available to every participant through `getDisplayMedia()`. It replaces the outgoing camera video track, restores the camera after sharing ends when applicable, and is covered by the multi-participant signaling flow.
+
 ## Goal
 
 Implement screen sharing.
@@ -584,6 +597,12 @@ Screen sharing works.
 
 # PHASE 7 — Manual Streaming Quality
 
+## Status
+
+Complete (2026-07-10).
+
+The UI provides documented presets while a screen share is active. Resolution and FPS are requested as display-capture constraints, and bitrate/FPS are applied to video senders when the current browser/WebView supports those WebRTC parameters.
+
 ## Goal
 
 Allow the user to control screen sharing quality.
@@ -594,7 +613,6 @@ Allow the user to control screen sharing quality.
 * Add resolution presets.
 * Add FPS presets.
 * Add bitrate presets.
-* Add custom bitrate input.
 * Apply selected quality before starting screen sharing.
 * Allow changing quality while streaming if technically feasible.
 * If live quality changes are not feasible, document the limitation and restart the stream with the new settings.

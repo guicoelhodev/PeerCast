@@ -21,6 +21,23 @@
     signalingUrl: string;
   };
 
+  type ScreenQualityPreset = {
+    id: "low" | "balanced" | "high" | "ultra" | "4k";
+    label: string;
+    width: number;
+    height: number;
+    fps: number;
+    bitrate: number;
+  };
+
+  const screenQualityPresets: ScreenQualityPreset[] = [
+    { id: "low", label: "Low - 720p30", width: 1280, height: 720, fps: 30, bitrate: 2_500_000 },
+    { id: "balanced", label: "Balanced - 1080p30", width: 1920, height: 1080, fps: 30, bitrate: 5_000_000 },
+    { id: "high", label: "High - 1080p60", width: 1920, height: 1080, fps: 60, bitrate: 8_000_000 },
+    { id: "ultra", label: "Ultra - 1440p60", width: 2560, height: 1440, fps: 60, bitrate: 14_000_000 },
+    { id: "4k", label: "4K Experimental - 4K30", width: 3840, height: 2160, fps: 30, bitrate: 20_000_000 },
+  ];
+
   interface GuestPeer {
     id: string;
     pc: RTCPeerConnection;
@@ -50,6 +67,7 @@
   let cameraState = "Stopped";
   let micState = "Stopped";
   let screenShareState = "Stopped";
+  let selectedScreenQualityId: ScreenQualityPreset["id"] = "balanced";
   let wasCameraOnBeforeShare = false;
   let screenStream: MediaStream | null = null;
   let webrtcAvailable = true;
@@ -475,10 +493,15 @@
 
   async function startScreenShare() {
     errorMessage = "";
+    const quality = getSelectedScreenQuality();
 
     try {
       screenStream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
+        video: {
+          width: { ideal: quality.width },
+          height: { ideal: quality.height },
+          frameRate: { ideal: quality.fps },
+        },
         audio: false,
       });
 
@@ -496,6 +519,8 @@
       localStream = screenStream;
       attachVideoStreams();
       sendVideoTrackToAllPeers(screenTrack);
+      await applyScreenQuality(screenTrack, quality);
+      infoMessage = `Screen sharing at ${quality.width}x${quality.height}, ${quality.fps} FPS, ${formatBitrate(quality.bitrate)}.`;
     } catch (error) {
       screenShareState = "Stopped";
       if (String(error) !== "AbortError") {
@@ -528,6 +553,54 @@
         renegotiate(guest);
       }
     }
+  }
+
+  function getSelectedScreenQuality(): ScreenQualityPreset {
+    return screenQualityPresets.find((item) => item.id === selectedScreenQualityId) ?? screenQualityPresets[1];
+  }
+
+  async function updateScreenQuality() {
+    if (screenShareState !== "Running" || !screenStream) return;
+
+    const quality = getSelectedScreenQuality();
+    const track = screenStream.getVideoTracks()[0];
+    if (!track) return;
+
+    await applyScreenQuality(track, quality);
+    infoMessage = `Quality updated: ${quality.width}x${quality.height}, ${quality.fps} FPS, ${formatBitrate(quality.bitrate)}.`;
+  }
+
+  async function applyScreenQuality(track: MediaStreamTrack, quality: ScreenQualityPreset) {
+    try {
+      await track.applyConstraints({
+        width: { ideal: quality.width },
+        height: { ideal: quality.height },
+        frameRate: { ideal: quality.fps },
+      });
+    } catch {
+      // Display capture constraints are browser hints and may be rejected after selection.
+    }
+
+    await Promise.all(
+      guestPeers.map(async (guest) => {
+        const sender = guest.pc.getSenders().find((item) => item.track?.kind === "video");
+        if (!sender) return;
+
+        try {
+          const parameters = sender.getParameters();
+          parameters.encodings = parameters.encodings.length > 0 ? parameters.encodings : [{}];
+          parameters.encodings[0].maxBitrate = quality.bitrate;
+          parameters.encodings[0].maxFramerate = quality.fps;
+          await sender.setParameters(parameters);
+        } catch {
+          // Older WebViews may not implement sender quality parameters.
+        }
+      }),
+    );
+  }
+
+  function formatBitrate(bitrate: number) {
+    return `${(bitrate / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 1 })} Mbps`;
   }
 
   async function renegotiate(guest: GuestPeer) {
@@ -774,6 +847,23 @@
                 <iconify-icon icon={screenShareState === "Running" ? "mdi:monitor-off" : "mdi:monitor-share"} class="text-sm"></iconify-icon>
               </button>
             </div>
+            {#if screenShareState === "Running"}
+              <div class="mt-3 space-y-2 rounded-lg bg-slate-800/40 p-2.5">
+                <div class="flex items-center justify-between">
+                  <p class="text-[10px] font-semibold uppercase tracking-[0.15em] text-slate-500">Screen quality</p>
+                  <span class="text-[10px] text-purple-300">Live</span>
+                </div>
+                <select
+                  class="w-full rounded border border-slate-700 bg-slate-800 px-2 py-1.5 text-[11px] text-slate-200 outline-none focus:border-purple-500"
+                  bind:value={selectedScreenQualityId}
+                  onchange={updateScreenQuality}>
+                  {#each screenQualityPresets as preset}
+                    <option value={preset.id}>{preset.label}</option>
+                  {/each}
+                </select>
+                <p class="text-[10px] leading-relaxed text-slate-500">Resolution and FPS are capture hints; bitrate is applied to video senders when supported.</p>
+              </div>
+            {/if}
           </div>
         {/if}
       {/if}
