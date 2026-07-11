@@ -1,0 +1,280 @@
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex},
+};
+
+use axum::{
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, State,
+    },
+    response::IntoResponse,
+    routing::get,
+    Json, Router,
+};
+use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
+use tokio::{net::TcpListener, sync::broadcast};
+use uuid::Uuid;
+
+const DEFAULT_SIGNALING_PORT: u16 = 17777;
+const ROOM_CHANNEL_CAPACITY: usize = 64;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalingStatus {
+    pub is_running: bool,
+    pub port: u16,
+    pub local_ip: Option<String>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomInfo {
+    pub room_id: String,
+    pub signaling_url: String,
+}
+
+#[derive(Debug)]
+struct Room {
+    tx: broadcast::Sender<SignalMessage>,
+    participants: HashMap<Uuid, String>,
+}
+
+#[derive(Debug, Clone)]
+struct SignalMessage {
+    sender_id: Uuid,
+    payload: String,
+}
+
+#[derive(Debug)]
+struct InnerState {
+    rooms: HashMap<String, Room>,
+    port: u16,
+    local_ip: Option<IpAddr>,
+    is_running: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SignalingState {
+    inner: Arc<Mutex<InnerState>>,
+}
+
+impl SignalingState {
+    pub fn new(local_ip: Option<IpAddr>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(InnerState {
+                rooms: HashMap::new(),
+                port: DEFAULT_SIGNALING_PORT,
+                local_ip,
+                is_running: false,
+            })),
+        }
+    }
+
+    pub fn create_room(&self) -> RoomInfo {
+        let room_id = Uuid::new_v4().simple().to_string();
+        let (tx, _) = broadcast::channel(ROOM_CHANNEL_CAPACITY);
+        let signaling_url = self.room_url(&room_id);
+
+        self.inner
+            .lock()
+            .expect("signaling state mutex poisoned")
+            .rooms
+            .insert(
+                room_id.clone(),
+                Room {
+                    tx,
+                    participants: HashMap::new(),
+                },
+            );
+
+        RoomInfo {
+            room_id,
+            signaling_url,
+        }
+    }
+
+    pub fn remove_room(&self, room_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("signaling state mutex poisoned")
+            .rooms
+            .remove(room_id)
+            .is_some()
+    }
+
+    pub fn status(&self) -> SignalingStatus {
+        let inner = self.inner.lock().expect("signaling state mutex poisoned");
+        let local_ip = inner.local_ip.map(|ip| ip.to_string());
+
+        SignalingStatus {
+            is_running: inner.is_running,
+            port: inner.port,
+            local_ip: local_ip.clone(),
+            url: local_ip.map(|ip| format!("ws://{ip}:{}", inner.port)),
+        }
+    }
+
+    fn mark_running(&self) {
+        self.inner
+            .lock()
+            .expect("signaling state mutex poisoned")
+            .is_running = true;
+    }
+
+    fn room_url(&self, room_id: &str) -> String {
+        let inner = self.inner.lock().expect("signaling state mutex poisoned");
+        let host = inner
+            .local_ip
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+
+        format!("ws://{host}:{}/ws/{room_id}", inner.port)
+    }
+
+    fn room_sender(&self, room_id: &str) -> Option<broadcast::Sender<SignalMessage>> {
+        self.inner
+            .lock()
+            .expect("signaling state mutex poisoned")
+            .rooms
+            .get(room_id)
+            .map(|room| room.tx.clone())
+    }
+
+    pub fn room_participants(&self, room_id: &str) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("signaling state mutex poisoned")
+            .rooms
+            .get(room_id)
+            .map(|room| room.participants.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn add_participant(&self, room_id: &str, connection_id: Uuid) {
+        if let Some(room) = self
+            .inner
+            .lock()
+            .expect("signaling state mutex poisoned")
+            .rooms
+            .get_mut(room_id)
+        {
+            room.participants
+                .insert(connection_id, format!("Participant {}", &connection_id.simple().to_string()[..8]));
+        }
+    }
+
+    fn identify_participant(&self, room_id: &str, connection_id: Uuid, payload: &str) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return;
+        };
+        let Some(peer_id) = value.get("peerId").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+
+        if let Some(room) = self
+            .inner
+            .lock()
+            .expect("signaling state mutex poisoned")
+            .rooms
+            .get_mut(room_id)
+        {
+            room.participants.insert(
+                connection_id,
+                format!("Participant {}", &peer_id[..peer_id.len().min(8)]),
+            );
+        }
+    }
+
+    fn remove_participant(&self, room_id: &str, connection_id: Uuid) {
+        if let Some(room) = self
+            .inner
+            .lock()
+            .expect("signaling state mutex poisoned")
+            .rooms
+            .get_mut(room_id)
+        {
+            room.participants.remove(&connection_id);
+        }
+    }
+}
+
+pub async fn run_server(state: SignalingState) -> Result<(), String> {
+    let port = state.status().port;
+    let app = Router::new()
+        .route("/ws/:room_id", get(websocket_handler))
+        .route("/rooms", get(create_room_handler))
+        .with_state(state.clone());
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|err| format!("failed to bind signaling server on {addr}: {err}"))?;
+    state.mark_running();
+
+    axum::serve(listener, app)
+        .await
+        .map_err(|err| format!("signaling server stopped: {err}"))
+}
+
+async fn create_room_handler(State(state): State<SignalingState>) -> Json<RoomInfo> {
+    Json(state.create_room())
+}
+
+async fn websocket_handler(
+    ws: WebSocketUpgrade,
+    Path(room_id): Path<String>,
+    State(state): State<SignalingState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, room_id, state))
+}
+
+async fn handle_socket(socket: WebSocket, room_id: String, state: SignalingState) {
+    let Some(tx) = state.room_sender(&room_id) else {
+        return;
+    };
+
+    let mut rx = tx.subscribe();
+    let (mut sender, mut receiver) = socket.split();
+    let peer_id = Uuid::new_v4();
+    state.add_participant(&room_id, peer_id);
+
+    let receive_state = state.clone();
+    let receive_room_id = room_id.clone();
+    let receive_task = tokio::spawn(async move {
+        while let Some(Ok(message)) = receiver.next().await {
+            match message {
+                Message::Text(text) => {
+                    receive_state.identify_participant(&receive_room_id, peer_id, &text);
+                    let _ = tx.send(SignalMessage {
+                        sender_id: peer_id,
+                        payload: text,
+                    });
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    let send_task = tokio::spawn(async move {
+        while let Ok(message) = rx.recv().await {
+            if message.sender_id == peer_id {
+                continue;
+            }
+
+            if sender.send(Message::Text(message.payload)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = receive_task => {}
+        _ = send_task => {}
+    }
+
+    state.remove_participant(&room_id, peer_id);
+}
