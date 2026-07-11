@@ -2,7 +2,12 @@ export const MAX_CHAT_MESSAGE_LENGTH = 500;
 export const MAX_DISPLAY_NAME_LENGTH = 50;
 
 export type SignalMessage =
-  | { type: "ready"; peerId: string; displayName?: string }
+  | {
+      type: "ready";
+      peerId: string;
+      displayName?: string;
+      microphoneMuted?: boolean;
+    }
   | { type: "participant-left"; peerId: string }
   | {
       type: "offer";
@@ -10,6 +15,7 @@ export type SignalMessage =
       targetPeerId: string;
       isHost?: boolean;
       displayName?: string;
+      microphoneMuted?: boolean;
       description: RTCSessionDescriptionInit;
     }
   | {
@@ -17,6 +23,7 @@ export type SignalMessage =
       peerId: string;
       targetPeerId: string;
       displayName?: string;
+      microphoneMuted?: boolean;
       description: RTCSessionDescriptionInit;
     }
   | {
@@ -31,6 +38,7 @@ export type SignalMessage =
       targetPeerId: string;
       audioKind: "microphone" | "system";
     }
+  | { type: "microphone-state"; peerId: string; microphoneMuted: boolean }
   | {
       type: "chat";
       peerId: string;
@@ -67,9 +75,18 @@ export function parseSignalMessage(data: string): SignalMessage | null {
             type: "ready",
             peerId,
             displayName: value.displayName.trim(),
+            ...(typeof value.microphoneMuted === "boolean"
+              ? { microphoneMuted: value.microphoneMuted }
+              : {}),
           };
         }
-        return { type: "ready", peerId };
+        return {
+          type: "ready",
+          peerId,
+          ...(typeof value.microphoneMuted === "boolean"
+            ? { microphoneMuted: value.microphoneMuted }
+            : {}),
+        };
       case "participant-left":
         return { type: "participant-left", peerId };
       case "offer":
@@ -88,6 +105,9 @@ export function parseSignalMessage(data: string): SignalMessage | null {
             ...(typeof value.displayName === "string" &&
             isValidDisplayName(value.displayName)
               ? { displayName: value.displayName.trim() }
+              : {}),
+            ...(typeof value.microphoneMuted === "boolean"
+              ? { microphoneMuted: value.microphoneMuted }
               : {}),
             description: value.description,
           };
@@ -119,6 +139,14 @@ export function parseSignalMessage(data: string): SignalMessage | null {
           };
         }
         return null;
+      case "microphone-state":
+        return typeof value.microphoneMuted === "boolean"
+          ? {
+              type: "microphone-state",
+              peerId,
+              microphoneMuted: value.microphoneMuted,
+            }
+          : null;
       case "chat":
         if (
           typeof value.messageId === "string" &&

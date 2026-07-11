@@ -101,6 +101,8 @@
     systemAudioSender: RTCRtpSender | null;
     pendingAudioKinds: Array<"microphone" | "system">;
     displayName: string;
+    isMuted: boolean;
+    isSpeaking: boolean;
   }
 
   let guestPeers: GuestPeer[] = [];
@@ -142,16 +144,26 @@
   let ws: WebSocket | null = null;
   let dataChannel: RTCDataChannel | null = null;
   let localStream: MediaStream | null = null;
+  let microphoneStream: MediaStream | null = null;
   let microphoneTrack: MediaStreamTrack | null = null;
   let localVideo: HTMLVideoElement | null = null;
+  let isLocalSpeaking = false;
   let videoGridClass = "video-grid--one";
 
-  let copied = false;
+  let copiedTarget: "host" | "participant" | "tailscale" | null = null;
+  let infoMessageTimer: ReturnType<typeof setTimeout> | null = null;
   let participantPoll: ReturnType<typeof setInterval> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempts = 0;
   let reconnectUrl = "";
   let shouldReconnect = false;
+  let connectionGeneration = 0;
+  let audioContext: AudioContext | null = null;
+  let speakingPoll: ReturnType<typeof setInterval> | null = null;
+  const audioAnalysers = new Map<
+    string,
+    { analyser: AnalyserNode; samples: Uint8Array }
+  >();
 
   $: videoGridClass = getVideoGridClass(guestPeers.length + 1);
 
@@ -267,15 +279,38 @@
     }
   }
 
-  async function copyText(text: string) {
+  async function copyText(
+    text: string,
+    target: "host" | "participant" | "tailscale",
+  ) {
     try {
       await navigator.clipboard.writeText(text);
-      copied = true;
-      setTimeout(() => (copied = false), 2000);
+      copiedTarget = target;
+      setTimeout(() => {
+        if (copiedTarget === target) copiedTarget = null;
+      }, 2000);
+      return true;
     } catch {
-      // ignore
+      return false;
     }
   }
+
+  function showTemporaryInfo(message: string) {
+    if (infoMessageTimer) clearTimeout(infoMessageTimer);
+    infoMessage = message;
+    infoMessageTimer = setTimeout(() => {
+      if (infoMessage === message) infoMessage = "";
+      infoMessageTimer = null;
+    }, 2000);
+  }
+
+  async function copyTailscaleCommand() {
+    if (await copyText(tailscaleUrlCommand, "tailscale")) {
+      showTemporaryInfo("Command copied successfully.");
+    }
+  }
+
+  const tailscaleUrlCommand = "tailscale status --json | jq -r '.Self.DNSName'";
 
   async function startHost(signalingUrl: string) {
     closeConnection();
@@ -298,7 +333,7 @@
 
   async function joinRoom() {
     if (!joinUrl.trim()) {
-      errorMessage = "Paste a room WebSocket URL before joining.";
+      errorMessage = "Open a room link before joining.";
       return;
     }
 
@@ -389,7 +424,60 @@
       }
       guestPeers = guestPeers;
       attachVideoStreams();
+      startSpeakingDetection();
     };
+  }
+
+  function getStreamAudioLevel(stream: MediaStream, key: string) {
+    if (stream.getAudioTracks().length === 0) return 0;
+
+    if (!audioContext) audioContext = new AudioContext();
+    if (audioContext.state === "suspended")
+      audioContext.resume().catch(() => {});
+
+    let audio = audioAnalysers.get(key);
+    if (!audio) {
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 512;
+      audioContext.createMediaStreamSource(stream).connect(analyser);
+      audio = { analyser, samples: new Uint8Array(analyser.fftSize) };
+      audioAnalysers.set(key, audio);
+    }
+
+    audio.analyser.getByteTimeDomainData(audio.samples);
+    const sum = audio.samples.reduce(
+      (total, sample) => total + Math.abs(sample - 128),
+      0,
+    );
+    return sum / audio.samples.length;
+  }
+
+  function updateSpeakingIndicators() {
+    isLocalSpeaking = Boolean(
+      microphoneStream &&
+      microphoneTrack?.enabled &&
+      getStreamAudioLevel(microphoneStream, "local") > 3,
+    );
+
+    for (const guest of guestPeers) {
+      guest.isSpeaking =
+        !guest.isMuted && getStreamAudioLevel(guest.micStream, guest.id) > 3;
+    }
+    guestPeers = guestPeers;
+  }
+
+  function startSpeakingDetection() {
+    if (speakingPoll) return;
+    speakingPoll = setInterval(updateSpeakingIndicators, 150);
+  }
+
+  function stopSpeakingDetection() {
+    if (speakingPoll) clearInterval(speakingPoll);
+    speakingPoll = null;
+    audioAnalysers.clear();
+    audioContext?.close().catch(() => {});
+    audioContext = null;
+    isLocalSpeaking = false;
   }
 
   function addChatMessage(message: ChatMessage) {
@@ -408,10 +496,7 @@
   function participantName(peerId: string, isOwn: boolean) {
     if (isOwn) return "You";
     const peer = guestPeers.find((guest) => guest.id === peerId);
-    return (
-      peer?.displayName ??
-      (peer?.isHost ? "Host" : `Participant ${peerId.slice(0, 8)}`)
-    );
+    return peer?.displayName ?? (peer?.isHost ? "Host" : "Participant");
   }
 
   function formatChatTime(sentAt: string) {
@@ -464,6 +549,11 @@
       signalingConnectionState = "Connecting";
 
       socket.onopen = () => {
+        if (ws !== socket || !shouldReconnect) {
+          socket.close();
+          reject(new Error("WebSocket connection cancelled"));
+          return;
+        }
         signalingConnectionState = "Connected";
         resolve();
       };
@@ -492,6 +582,7 @@
 
   function scheduleReconnect() {
     if (reconnectTimer || !shouldReconnect) return;
+    const generation = connectionGeneration;
     const delay = Math.min(1_000 * 2 ** reconnectAttempts, 10_000);
     reconnectAttempts += 1;
     signalingConnectionState = "Reconnecting";
@@ -500,11 +591,14 @@
       reconnectTimer = null;
       try {
         await connectSignaling(reconnectUrl);
+        if (!shouldReconnect || generation !== connectionGeneration) return;
         reconnectAttempts = 0;
         sendReadySignal();
         infoMessage = "Reconnected to the room.";
       } catch {
-        scheduleReconnect();
+        if (shouldReconnect && generation === connectionGeneration) {
+          scheduleReconnect();
+        }
       }
     }, delay);
   }
@@ -527,6 +621,7 @@
       if (existingPeer) {
         existingPeer.displayName =
           message.displayName ?? existingPeer.displayName;
+        existingPeer.isMuted = message.microphoneMuted ?? existingPeer.isMuted;
         guestPeers = guestPeers;
         if (!existingPeer.isHost) return;
         // A host refresh keeps its ID and replaces the previous peer connection.
@@ -547,8 +642,9 @@
         systemVolume: 1,
         systemAudioSender: null,
         pendingAudioKinds: [],
-        displayName:
-          message.displayName ?? `Participant ${guestId.slice(0, 8)}`,
+        displayName: message.displayName ?? "Participant",
+        isMuted: message.microphoneMuted ?? false,
+        isSpeaking: false,
         videoEl: null,
         micAudioEl: null,
         systemAudioEl: null,
@@ -569,9 +665,10 @@
         targetPeerId: guestId,
         isHost: peerRole === "host",
         displayName,
+        microphoneMuted: micState === "Muted",
         description: offer,
       });
-      infoMessage = `Offer sent to ${guestId.slice(0, 8)}.`;
+      infoMessage = `Offer sent to ${guest.displayName}.`;
 
       return;
     }
@@ -614,8 +711,9 @@
           systemVolume: 1,
           systemAudioSender: null,
           pendingAudioKinds: [],
-          displayName:
-            message.displayName ?? `Participant ${message.peerId.slice(0, 8)}`,
+          displayName: message.displayName ?? "Participant",
+          isMuted: message.microphoneMuted ?? false,
+          isSpeaking: false,
           videoEl: null,
           micAudioEl: null,
           systemAudioEl: null,
@@ -625,6 +723,7 @@
       } else if (message.isHost) {
         guest.isHost = true;
         guest.displayName = message.displayName ?? guest.displayName;
+        guest.isMuted = message.microphoneMuted ?? guest.isMuted;
         guestPeers = guestPeers;
       }
 
@@ -638,6 +737,7 @@
         peerId: myPeerId,
         targetPeerId: message.peerId,
         displayName,
+        microphoneMuted: micState === "Muted",
         description: answer,
       });
       infoMessage = "Answer sent. Waiting for peer connection.";
@@ -649,8 +749,10 @@
       const guest = guestPeers.find((g) => g.id === message.peerId);
       if (!guest) return;
 
+      guest.isMuted = message.microphoneMuted ?? guest.isMuted;
+      guestPeers = guestPeers;
       await guest.pc.setRemoteDescription(message.description);
-      infoMessage = `Participant ${message.peerId.slice(0, 8)} connected.`;
+      infoMessage = `${guest.displayName} connected.`;
       return;
     }
 
@@ -667,6 +769,16 @@
       const guest = guestPeers.find((peer) => peer.id === message.peerId);
       if (guest) guest.pendingAudioKinds.push(message.audioKind);
     }
+
+    if (message.type === "microphone-state") {
+      if (message.peerId === myPeerId) return;
+      const guest = guestPeers.find((peer) => peer.id === message.peerId);
+      if (guest) {
+        guest.isMuted = message.microphoneMuted;
+        guest.isSpeaking = false;
+        guestPeers = guestPeers;
+      }
+    }
   }
 
   function sendSignal(message: SignalMessage) {
@@ -676,7 +788,12 @@
   }
 
   function sendReadySignal() {
-    sendSignal({ type: "ready", peerId: myPeerId, displayName });
+    sendSignal({
+      type: "ready",
+      peerId: myPeerId,
+      displayName,
+      microphoneMuted: micState === "Muted",
+    });
   }
 
   function updatePeerCount() {
@@ -696,15 +813,12 @@
     }
 
     try {
-      localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-      });
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true });
       cameraState = "Running";
-      micState = "Active";
-      microphoneTrack = localStream.getAudioTracks()[0] ?? null;
       attachVideoStreams();
       addLocalTracksToAllPeers();
+
+      if (!microphoneTrack) await startMicrophone();
 
       for (const guest of guestPeers) {
         // Camera tracks need an offer even while the connection state is still settling.
@@ -712,39 +826,61 @@
       }
     } catch (error) {
       cameraState = "Error";
-      micState = "Error";
       const hint =
         window.location.hostname !== "localhost"
           ? " Access via http://localhost:5173 or use pnpm tauri:dev."
-          : " Grant camera and microphone permission in your browser and try again.";
+          : " Grant camera permission in your browser and try again.";
       errorMessage = `Failed to start camera: ${String(error)}.${hint}`;
     }
   }
 
-  function toggleMic() {
-    const audioTracks = microphoneTrack
-      ? [microphoneTrack]
-      : (localStream?.getAudioTracks() ?? []);
+  async function startMicrophone() {
+    try {
+      microphoneStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+      });
+      microphoneTrack = microphoneStream.getAudioTracks()[0] ?? null;
+      if (!microphoneTrack) throw new Error("No microphone track available");
 
-    if (audioTracks.length === 0) {
-      micState = "No track";
+      micState = "Active";
+      startSpeakingDetection();
+      addLocalTracksToAllPeers();
+      await Promise.all(guestPeers.map(renegotiate));
+      sendSignal({
+        type: "microphone-state",
+        peerId: myPeerId,
+        microphoneMuted: false,
+      });
+    } catch (error) {
+      micState = "Error";
+      errorMessage = `Failed to start microphone: ${String(error)}`;
+    }
+  }
+
+  async function toggleMic() {
+    if (!microphoneTrack) {
+      await startMicrophone();
       return;
     }
 
-    const currentlyMuted = !audioTracks[0].enabled;
-    audioTracks.forEach((track) => (track.enabled = currentlyMuted));
+    const currentlyMuted = !microphoneTrack.enabled;
+    microphoneTrack.enabled = currentlyMuted;
     micState = currentlyMuted ? "Active" : "Muted";
+    if (!currentlyMuted) isLocalSpeaking = false;
+    sendSignal({
+      type: "microphone-state",
+      peerId: myPeerId,
+      microphoneMuted: !currentlyMuted,
+    });
   }
 
   function stopCamera() {
-    localStream?.getTracks().forEach((track) => track.stop());
+    localStream?.getVideoTracks().forEach((track) => track.stop());
     localStream = null;
-    microphoneTrack = null;
     cameraState = "Stopped";
-    micState = "Stopped";
     for (const guest of guestPeers) {
       for (const sender of guest.pc.getSenders()) {
-        if (sender.track?.kind === "video" || sender.track?.kind === "audio") {
+        if (sender.track?.kind === "video") {
           sender.replaceTrack(null).catch(() => {});
         }
       }
@@ -817,7 +953,6 @@
     screenStream.getTracks().forEach((track) => track.stop());
     screenStream = null;
     localStream = null;
-    microphoneTrack = null;
     screenShareState = "Stopped";
     screenAudioAvailable = false;
     attachVideoStreams();
@@ -968,18 +1103,8 @@
   }
 
   function addLocalTracksToPeerConnection(pc: RTCPeerConnection) {
-    if (!localStream) return;
-    const tracks = localStream
-      .getTracks()
-      .filter(
-        (track) => !(screenShareState === "Running" && track.kind === "audio"),
-      );
-    if (
-      microphoneTrack &&
-      !tracks.some((track) => track.id === microphoneTrack?.id)
-    ) {
-      tracks.push(microphoneTrack);
-    }
+    const tracks = [...(localStream?.getVideoTracks() ?? [])];
+    if (microphoneTrack) tracks.push(microphoneTrack);
     for (const track of tracks) {
       const sender = pc
         .getSenders()
@@ -987,7 +1112,10 @@
       if (sender) {
         sender.replaceTrack(track).catch(() => {});
       } else {
-        pc.addTrack(track, localStream);
+        pc.addTrack(
+          track,
+          localStream ?? microphoneStream ?? new MediaStream([track]),
+        );
       }
     }
   }
@@ -1056,6 +1184,7 @@
   }
 
   function closeConnection() {
+    connectionGeneration += 1;
     shouldReconnect = false;
     reconnectAttempts = 0;
     reconnectUrl = "";
@@ -1067,13 +1196,17 @@
     dataChannel?.close();
     screenStream?.getTracks().forEach((track) => track.stop());
     localStream?.getTracks().forEach((track) => track.stop());
+    microphoneStream?.getTracks().forEach((track) => track.stop());
     for (const guest of guestPeers) {
       guest.pc.close();
     }
+    stopSpeakingDetection();
     ws = null;
     dataChannel = null;
     screenStream = null;
     localStream = null;
+    microphoneStream = null;
+    microphoneTrack = null;
     guestPeers = [];
     peerRole = null;
     isConnecting = false;
@@ -1114,27 +1247,40 @@
       <!-- ALERTS -->
       {#if errorMessage}
         <div
-          class="rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2"
+          class="flex items-start justify-between gap-2 rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2"
         >
           <p class="text-xs text-red-200">{errorMessage}</p>
+          <button
+            class="-mr-1 -mt-1 rounded p-1 text-red-200/70 transition hover:bg-red-400/10 hover:text-red-100"
+            type="button"
+            onclick={() => (errorMessage = "")}
+            aria-label="Close error message"
+            title="Close"
+          >
+            <iconify-icon icon="mdi:close" class="text-sm"></iconify-icon>
+          </button>
         </div>
       {/if}
       {#if infoMessage}
         <div
-          class="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2"
+          class="flex items-start justify-between gap-2 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2"
         >
           <p class="text-xs text-cyan-200">{infoMessage}</p>
+          <button
+            class="-mr-1 -mt-1 rounded p-1 text-cyan-200/70 transition hover:bg-cyan-400/10 hover:text-cyan-100"
+            type="button"
+            onclick={() => (infoMessage = "")}
+            aria-label="Close information message"
+            title="Close"
+          >
+            <iconify-icon icon="mdi:close" class="text-sm"></iconify-icon>
+          </button>
         </div>
       {/if}
 
       {#if isTauri}
         <!-- ========== TAURI SERVER VIEW ========== -->
         <div>
-          <p
-            class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500"
-          >
-            Signaling Server
-          </p>
           <label
             class="mb-2 block text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500"
             for="public-app-url">Share URL (Tailscale)</label
@@ -1237,28 +1383,8 @@
             placeholder="How should people see you?"
             type="text"
           />
-          <div class="flex gap-2">
-            <input
-              id="join-url"
-              class="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-mono text-slate-200 outline-none placeholder:text-slate-600 focus:border-cyan-500"
-              bind:value={joinUrl}
-              placeholder="ws://192.168.15.8:17777/ws/..."
-              type="text"
-            />
-            <button
-              class="flex-shrink-0 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-slate-500 transition hover:text-cyan-400 hover:border-slate-600"
-              type="button"
-              onclick={() => copyText(joinUrl)}
-              title="Copy"
-            >
-              <iconify-icon
-                icon={copied ? "mdi:check" : "mdi:content-copy"}
-                class="text-xs"
-              ></iconify-icon>
-            </button>
-          </div>
           <button
-            class="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 shadow-lg shadow-cyan-500/25 transition hover:bg-cyan-400"
+            class="flex w-full items-center justify-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 shadow-lg shadow-cyan-500/25 transition hover:bg-cyan-400"
             type="button"
             onclick={joinRoom}
           >
@@ -1348,7 +1474,11 @@
                     : 'border-slate-700 text-slate-300'} px-2 py-2 text-[11px] font-medium transition hover:border-cyan-500 hover:text-cyan-300"
                 type="button"
                 onclick={toggleMic}
-                title={micState === "Muted" ? "Unmute" : "Mute"}
+                title={!microphoneTrack
+                  ? "Start microphone"
+                  : micState === "Muted"
+                    ? "Unmute"
+                    : "Mute"}
               >
                 <iconify-icon
                   icon={micState === "Muted"
@@ -1558,29 +1688,7 @@
               </div>
             </div>
 
-            <div class="grid gap-4 lg:grid-cols-3">
-              <div
-                class="rounded-xl border border-slate-800 bg-slate-900/60 p-4"
-              >
-                <div class="flex items-center justify-between">
-                  <p
-                    class="text-[10px] uppercase tracking-wider text-slate-500"
-                  >
-                    Signaling URL
-                  </p>
-                  <button
-                    type="button"
-                    onclick={() => copyText(room!.signalingUrl)}
-                    title="Copy"
-                    ><iconify-icon
-                      icon={copied ? "mdi:check" : "mdi:content-copy"}
-                    ></iconify-icon></button
-                  >
-                </div>
-                <p class="mt-3 break-all font-mono text-xs text-emerald-300">
-                  {room.signalingUrl}
-                </p>
-              </div>
+            <div class="grid gap-4 lg:grid-cols-2">
               <div
                 class="rounded-xl border border-slate-800 bg-slate-900/60 p-4"
               >
@@ -1592,10 +1700,12 @@
                   </p>
                   <button
                     type="button"
-                    onclick={() => copyText(browserHostUrl)}
+                    onclick={() => copyText(browserHostUrl, "host")}
                     title="Copy"
                     ><iconify-icon
-                      icon={copied ? "mdi:check" : "mdi:content-copy"}
+                      icon={copiedTarget === "host"
+                        ? "mdi:check"
+                        : "mdi:content-copy"}
                     ></iconify-icon></button
                   >
                 </div>
@@ -1617,10 +1727,13 @@
                     onclick={() =>
                       copyText(
                         buildGuestUrl(room!.signalingUrl, room!.publicAppUrl),
+                        "participant",
                       )}
                     title="Copy"
                     ><iconify-icon
-                      icon={copied ? "mdi:check" : "mdi:content-copy"}
+                      icon={copiedTarget === "participant"
+                        ? "mdi:check"
+                        : "mdi:content-copy"}
                     ></iconify-icon></button
                   >
                 </div>
@@ -1661,12 +1774,23 @@
               </p>
               <p>
                 <span class="mr-2 font-bold text-slate-400">3.</span>Share the
-                <span class="font-semibold text-emerald-300">signaling URL</span
+                <span class="font-semibold text-purple-300"
+                  >participant URL</span
                 > with guests
               </p>
               <p>
                 <span class="mr-2 font-bold text-slate-400">4.</span>Close this
                 app when done. Rooms are ephemeral.
+              </p>
+              <p>
+                To find your Tailscale URL, copy this
+                <button
+                  class="cursor-pointer font-semibold text-cyan-300 transition hover:text-cyan-200"
+                  type="button"
+                  onclick={copyTailscaleCommand}
+                  aria-label="Copy Tailscale URL command"
+                  title="Copy command">command</button
+                > and run it in your terminal.
               </p>
             </div>
           </div>
@@ -1700,6 +1824,15 @@
                 class="absolute left-3 top-3 z-10 flex items-center gap-2 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur"
               >
                 <span class="text-xs text-slate-300">You</span>
+                {#if micState === "Muted"}
+                  <span
+                    class="flex items-center gap-1 rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] text-red-300"
+                  >
+                    <iconify-icon icon="mdi:microphone-off" class="text-xs"
+                    ></iconify-icon>
+                    Muted
+                  </span>
+                {/if}
                 <span
                   class="rounded {screenShareState === 'Running'
                     ? 'bg-purple-500/30 text-purple-300'
@@ -1732,8 +1865,9 @@
                   aria-label={`${displayName} avatar`}
                 >
                   <span
-                    class="flex h-20 w-20 items-center justify-center rounded-full bg-cyan-500/20 text-2xl font-semibold tracking-wide text-cyan-200"
-                    >{initials(displayName)}</span
+                    class="flex h-20 w-20 items-center justify-center rounded-full bg-cyan-500/20 text-2xl font-semibold tracking-wide text-cyan-200 transition-all {isLocalSpeaking
+                      ? 'ring-2 ring-emerald-400 ring-offset-2 ring-offset-slate-900'
+                      : ''}">{initials(displayName)}</span
                   >
                 </div>
               {/if}
@@ -1752,9 +1886,20 @@
                 <div
                   class="absolute left-3 top-3 z-10 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur"
                 >
-                  <span class="text-xs text-slate-300">
-                    {guest.displayName}
-                  </span>
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs text-slate-300"
+                      >{guest.displayName}</span
+                    >
+                    {#if guest.isMuted}
+                      <span
+                        class="flex items-center gap-1 rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] text-red-300"
+                      >
+                        <iconify-icon icon="mdi:microphone-off" class="text-xs"
+                        ></iconify-icon>
+                        Muted
+                      </span>
+                    {/if}
+                  </div>
                 </div>
                 <div
                   class="absolute right-3 top-3 z-10 flex gap-1.5 opacity-0 transition-opacity group-hover:opacity-100"
@@ -1830,8 +1975,9 @@
                     aria-label={`${guest.displayName} avatar`}
                   >
                     <span
-                      class="flex h-20 w-20 items-center justify-center rounded-full bg-purple-500/20 text-2xl font-semibold tracking-wide text-purple-200"
-                      >{initials(guest.displayName)}</span
+                      class="flex h-20 w-20 items-center justify-center rounded-full bg-purple-500/20 text-2xl font-semibold tracking-wide text-purple-200 transition-all {guest.isSpeaking
+                        ? 'ring-2 ring-emerald-400 ring-offset-2 ring-offset-slate-900'
+                        : ''}">{initials(guest.displayName)}</span
                     >
                   </div>
                 {/if}
@@ -1966,21 +2112,17 @@
             Join a streaming session
           </h3>
           <p class="mt-2 max-w-md text-sm text-slate-400">
-            Paste a signaling URL in the sidebar, then click <span
-              class="font-semibold text-cyan-300">Join</span
-            >
-            to connect. Add <code class="text-cyan-300">?role=host</code> to the URL
-            to stream.
+            Open the room link shared by the host, enter your name, and click
+            <span class="font-semibold text-cyan-300">Join</span> to connect.
           </p>
           <div class="mt-6 space-y-2 text-xs text-slate-500">
             <p>
-              <span class="mr-2 font-bold text-slate-400">1.</span>Get a
-              signaling URL from the host (starts with
-              <code class="text-cyan-300">ws://</code>)
+              <span class="mr-2 font-bold text-slate-400">1.</span>Open the
+              participant link shared by the host
             </p>
             <p>
-              <span class="mr-2 font-bold text-slate-400">2.</span>Paste it in
-              the <span class="font-semibold text-slate-300">Connection</span> field
+              <span class="mr-2 font-bold text-slate-400">2.</span>Enter the
+              name you want participants to see
             </p>
             <p>
               <span class="mr-2 font-bold text-slate-400">3.</span>Click
