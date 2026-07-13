@@ -28,12 +28,12 @@ Os convidados não instalam PeerCast. Eles precisam apenas do Tailscale conectad
 
 Baixe a versão mais recente em [GitHub Releases](https://github.com/guicoelhodev/PeerCast/releases/latest):
 
-| Sistema do host                   | Arquivo para baixar                                          |
-| --------------------------------- | ------------------------------------------------------------ |
-| Windows                           | arquivo `.msi` ou `-setup.exe`                               |
-| macOS Apple Silicon (M1/M2/M3/M4) | arquivo `.dmg` com `aarch64` no nome                         |
-| macOS Intel                       | arquivo `.dmg` com `x64` ou `x86_64` no nome                 |
-| Linux                             | arquivo `.AppImage` (mais simples) ou `.deb` (Debian/Ubuntu) |
+| Sistema do host                   | Arquivo para baixar                          |
+| --------------------------------- | -------------------------------------------- |
+| Windows                           | arquivo `.msi` ou `-setup.exe`               |
+| macOS Apple Silicon (M1/M2/M3/M4) | arquivo `.dmg` com `aarch64` no nome         |
+| macOS Intel                       | arquivo `.dmg` com `x64` ou `x86_64` no nome |
+| Linux                             | arquivo `.AppImage`                          |
 
 Como o app é distribuído diretamente pelo GitHub, Windows e macOS podem exibir um alerta de aplicativo não assinado. Para uso entre amigos, confirme que o arquivo veio da página oficial de Releases acima antes de prosseguir.
 
