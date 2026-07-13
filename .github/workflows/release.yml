@@ -46,15 +46,18 @@ jobs:
       - name: Install Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
-          sudo apt-get update
+          sudo sed -i -E \
+            's|https?://(azure\.)?archive\.ubuntu\.com/ubuntu/?|https://snapshot.ubuntu.com/ubuntu/20241001T000000Z/|g; s|https?://security\.ubuntu\.com/ubuntu/?|https://snapshot.ubuntu.com/ubuntu/20241001T000000Z/|g' \
+            /etc/apt/sources.list
+          sudo apt-get -o Acquire::Check-Valid-Until=false update
           sudo apt-get install -y libappindicator3-dev librsvg2-dev patchelf
           sudo apt-get install -y --allow-downgrades \
-            libwebkit2gtk-4.1-0=2.36.0-2ubuntu1 \
-            libwebkit2gtk-4.1-dev=2.36.0-2ubuntu1 \
-            libjavascriptcoregtk-4.1-0=2.36.0-2ubuntu1 \
-            libjavascriptcoregtk-4.1-dev=2.36.0-2ubuntu1 \
-            gir1.2-javascriptcoregtk-4.1=2.36.0-2ubuntu1 \
-            gir1.2-webkit2-4.1=2.36.0-2ubuntu1
+            libwebkit2gtk-4.1-0=2.44.3-0ubuntu0.22.04.1 \
+            libwebkit2gtk-4.1-dev=2.44.3-0ubuntu0.22.04.1 \
+            libjavascriptcoregtk-4.1-0=2.44.3-0ubuntu0.22.04.1 \
+            libjavascriptcoregtk-4.1-dev=2.44.3-0ubuntu0.22.04.1 \
+            gir1.2-javascriptcoregtk-4.1=2.44.3-0ubuntu0.22.04.1 \
+            gir1.2-webkit2-4.1=2.44.3-0ubuntu0.22.04.1
 
       - name: Build installers and publish the GitHub Release
         uses: tauri-apps/tauri-action@v1
