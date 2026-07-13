@@ -67,6 +67,10 @@ select {
   grid-template: repeat(3, minmax(0, 1fr)) / repeat(3, minmax(0, 1fr));
 }
 
+.video-grid--focused {
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+}
+
 .video-tile {
   min-width: 0;
   min-height: 0;

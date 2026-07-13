@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import "iconify-icon";
 
   import {
@@ -158,6 +158,7 @@
   let microphoneTrack: MediaStreamTrack | null = null;
   let localVideo: HTMLVideoElement | null = null;
   let isLocalSpeaking = false;
+  let focusedTileId: string | null = null;
   let videoGridClass = "video-grid--one";
 
   let copiedTarget:
@@ -899,6 +900,12 @@
     errorMessage = "Data channel not available in multi-guest mode.";
   }
 
+  async function toggleFocusedTile(tileId: string) {
+    focusedTileId = focusedTileId === tileId ? null : tileId;
+    await tick();
+    attachVideoStreams();
+  }
+
   function mediaDevicesFor(feature: "camera" | "microphone" | "screen") {
     if (navigator.mediaDevices) return navigator.mediaDevices;
 
@@ -1398,6 +1405,7 @@
     unreadChatMessages = 0;
     isChatOpen = false;
     isSidebarOpen = false;
+    focusedTileId = null;
   }
 </script>
 
@@ -2122,9 +2130,20 @@
       {:else if peerRole}
         <!-- BROWSER: Call active -->
         <div class="call-layout flex h-full min-h-0 gap-3">
-          <div class={`video-grid ${videoGridClass}`}>
+          <div class={`video-grid ${focusedTileId ? 'video-grid--focused' : videoGridClass}`}>
+            {#if !focusedTileId || focusedTileId === "local"}
             <div
-              class="video-tile relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group"
+              class="video-tile relative cursor-pointer overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group"
+              role="button"
+              tabindex="0"
+              aria-label="Focus your video"
+              onclick={() => toggleFocusedTile("local")}
+              onkeydown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  toggleFocusedTile("local");
+                }
+              }}
             >
               <div
                 class="absolute left-3 top-3 z-10 flex items-center gap-2 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur"
@@ -2158,7 +2177,10 @@
                 <button
                   class="rounded-lg bg-slate-950/70 p-2 text-slate-300 backdrop-blur transition hover:text-white"
                   type="button"
-                  onclick={() => toggleFullscreen(localVideo)}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    toggleFullscreen(localVideo);
+                  }}
                   title="Fullscreen"
                 >
                   <iconify-icon icon="mdi:fullscreen" class="text-sm"
@@ -2185,9 +2207,21 @@
                 playsinline
               ></video>
             </div>
+            {/if}
             {#each guestPeers as guest (guest.id)}
+              {#if !focusedTileId || focusedTileId === guest.id}
               <div
-                class="video-tile relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group"
+                class="video-tile relative cursor-pointer overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60 group"
+                role="button"
+                tabindex="0"
+                aria-label={`Focus ${guest.displayName}'s video`}
+                onclick={() => toggleFocusedTile(guest.id)}
+                onkeydown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    toggleFocusedTile(guest.id);
+                  }
+                }}
               >
                 <div
                   class="absolute left-3 top-3 z-10 rounded-lg bg-slate-950/70 px-2.5 py-1 backdrop-blur"
@@ -2213,7 +2247,10 @@
                   <button
                     class="rounded-lg bg-slate-950/70 p-2 text-slate-300 backdrop-blur transition hover:text-white"
                     type="button"
-                    onclick={() => toggleFullscreen(guest.videoEl)}
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      toggleFullscreen(guest.videoEl);
+                    }}
                     title="Fullscreen"
                   >
                     <iconify-icon icon="mdi:fullscreen" class="text-sm"
@@ -2231,6 +2268,7 @@
                       max="1"
                       step="0.01"
                       value={guest.audioVolume}
+                      onclick={(event) => event.stopPropagation()}
                       oninput={(e) =>
                         setGuestVolume(
                           guest,
@@ -2269,6 +2307,7 @@
                 ></video>
                 <audio bind:this={guest.audioEl} autoplay playsinline></audio>
               </div>
+              {/if}
             {/each}
           </div>
           {#if isChatOpen}
