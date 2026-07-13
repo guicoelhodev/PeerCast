@@ -19,7 +19,7 @@ jobs:
           - platform: macos-latest
             args: --target x86_64-apple-darwin --bundles dmg
           - platform: ubuntu-22.04
-            args: --bundles appimage,deb
+            args: --bundles appimage
           - platform: windows-latest
             args: --bundles msi,nsis
 
@@ -46,18 +46,8 @@ jobs:
       - name: Install Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
-          sudo sed -i -E \
-            's|https?://(azure\.)?archive\.ubuntu\.com/ubuntu/?|https://snapshot.ubuntu.com/ubuntu/20241001T000000Z/|g; s|https?://security\.ubuntu\.com/ubuntu/?|https://snapshot.ubuntu.com/ubuntu/20241001T000000Z/|g' \
-            /etc/apt/sources.list
-          sudo apt-get -o Acquire::Check-Valid-Until=false update
-          sudo apt-get install -y libappindicator3-dev librsvg2-dev patchelf
-          sudo apt-get install -y --allow-downgrades \
-            libwebkit2gtk-4.1-0=2.44.3-0ubuntu0.22.04.1 \
-            libwebkit2gtk-4.1-dev=2.44.3-0ubuntu0.22.04.1 \
-            libjavascriptcoregtk-4.1-0=2.44.3-0ubuntu0.22.04.1 \
-            libjavascriptcoregtk-4.1-dev=2.44.3-0ubuntu0.22.04.1 \
-            gir1.2-javascriptcoregtk-4.1=2.44.3-0ubuntu0.22.04.1 \
-            gir1.2-webkit2-4.1=2.44.3-0ubuntu0.22.04.1
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Build installers and publish the GitHub Release
         uses: tauri-apps/tauri-action@v1
