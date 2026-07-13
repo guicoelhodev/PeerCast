@@ -1,8 +1,26 @@
 # PeerCast
 
-PeerCast é um app local para compartilhar tela, câmera, microfone e chat com amigos. Não há contas, servidor na nuvem ou serviço de streaming: quem hospeda a sala executa o aplicativo no próprio computador e os convidados entram pelo navegador.
+_Eu gosto do Discord, mas não quero pagar o Nitro para compartilhar em full HD minha tela._
+
+<div align="center">
+  <img src=".github/screen_client.png" alt="Tela de participante do PeerCast" />
+</div>
+
+PeerCast é um app local: quem hospeda a sala executa o aplicativo no próprio computador e os convidados entram pelo navegador. Durante o compartilhamento de tela, o host escolhe a qualidade de transmissão para equilibrar resolução, FPS, bitrate e uso de rede.
 
 As salas funcionam de forma privada através do Tailscale. Isso evita abrir portas no roteador ou expor sua máquina na internet pública.
+
+## Qualidade de transmissão
+
+Ao compartilhar a tela, escolha uma qualidade conforme a conexão de upload do host:
+
+| Qualidade       | Resolução e FPS    | Bitrate alvo |
+| --------------- | ------------------ | ------------ |
+| Low             | Até 720p a 30 FPS  | 2,5 Mbps     |
+| Balanced        | Até 1080p a 30 FPS | 5 Mbps       |
+| High            | Até 1080p a 60 FPS | 8 Mbps       |
+| Ultra           | Até 1440p a 60 FPS | 14 Mbps      |
+| 4K Experimental | Até 4K a 30 FPS    | 20 Mbps      |
 
 ## Para quem é cada download?
 
@@ -85,22 +103,6 @@ Trate a URL da sala como um convite privado. Pare a sala no app quando terminar.
 PeerCast é pensado para grupos pequenos de amigos. Cada convidado recebe uma conexão WebRTC própria do host, portanto upload e uso de CPU aumentam a cada pessoa conectada.
 
 Comece com até 4–6 convidados e a qualidade **Balanced (1080p30)**. Se houver travamentos, use **Low (720p30)** ou diminua o número de convidados. A qualidade real depende do upload do host e da rede dos participantes.
-
-## Criar uma release
-
-O repositório possui dois workflows:
-
-- **Check**: roda em pull requests e pushes na `master`, verificando tipos e testes Rust.
-- **Release desktop apps**: é disparado ao enviar uma tag que começa com `v`, cria/atualiza a GitHub Release e publica instaladores para Windows, macOS e Linux.
-
-Para publicar uma versão, mantenha a versão de `package.json` e `src-tauri/tauri.conf.json` alinhada e execute:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-Depois acompanhe a execução na aba **Actions** do GitHub. Ao terminar, os downloads aparecerão em [Releases](https://github.com/guicoelhodev/PeerCast/releases).
 
 ## Desenvolvimento local
 
