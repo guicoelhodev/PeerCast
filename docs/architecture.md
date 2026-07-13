@@ -68,7 +68,7 @@ Chat text is limited to 500 characters. The frontend validates incoming payloads
 
 ## Sharing Modes and Reconnection
 
-The embedded Axum server serves the built Svelte client when the desktop app is running. Each room is created in one of two modes: local network rooms derive HTTP and WebSocket URLs from the detected local IP, while Tailscale rooms accept a host-provided MagicDNS HTTPS origin and derive a matching `wss://` signaling endpoint. Tailscale stays external to the application; PeerCast does not manage Docker, authentication keys, or the Tailscale daemon.
+The embedded Axum server serves the built Svelte client when the desktop app is running. It listens only on localhost; rooms use a host-provided Tailscale MagicDNS HTTPS origin and derive a matching `wss://` signaling endpoint. Tailscale stays external to the application; PeerCast does not manage Docker, authentication keys, or the Tailscale daemon.
 
 Browser clients treat unexpected WebSocket closure as temporary. They reconnect with exponential backoff, send `ready` again, and recreate their WebRTC mesh connections while retaining active local camera and screen tracks. A deliberate Leave action cancels retries.
 
