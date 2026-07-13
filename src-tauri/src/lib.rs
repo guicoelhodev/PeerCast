@@ -1,5 +1,5 @@
-pub mod network;
 pub mod signaling;
+pub mod tailscale;
 
 use signaling::{RoomInfo, SignalingState, SignalingStatus};
 use std::path::PathBuf;
@@ -11,11 +11,16 @@ fn signaling_status(state: tauri::State<'_, SignalingState>) -> SignalingStatus 
 }
 
 #[tauri::command]
-fn create_room(
+fn create_tailscale_room(
     state: tauri::State<'_, SignalingState>,
-    public_app_url: Option<String>,
+    public_app_url: String,
 ) -> Result<RoomInfo, String> {
-    state.create_room(public_app_url)
+    state.create_room(Some(public_app_url))
+}
+
+#[tauri::command]
+async fn tailscale_status() -> tailscale::TailscaleStatus {
+    tailscale::status().await
 }
 
 #[tauri::command]
@@ -50,7 +55,7 @@ fn frontend_static_dir(app: &tauri::App) -> Option<PathBuf> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let signaling_state = SignalingState::new(network::local_ip());
+    let signaling_state = SignalingState::new();
     let server_state = signaling_state.clone();
 
     tauri::Builder::default()
@@ -79,7 +84,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             signaling_status,
-            create_room,
+            create_tailscale_room,
+            tailscale_status,
             stop_room,
             room_participants
         ])

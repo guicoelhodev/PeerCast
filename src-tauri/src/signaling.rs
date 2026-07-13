@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -14,7 +14,7 @@ use axum::{
     http::{header::CONTENT_TYPE, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
+    Router,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
@@ -31,8 +31,6 @@ const MAX_DISPLAY_NAME_LENGTH: usize = 50;
 pub struct SignalingStatus {
     pub is_running: bool,
     pub port: u16,
-    pub local_ip: Option<String>,
-    pub url: Option<String>,
     pub active_room: Option<RoomInfo>,
 }
 
@@ -62,7 +60,6 @@ struct SignalMessage {
 struct InnerState {
     rooms: HashMap<String, Room>,
     port: u16,
-    local_ip: Option<IpAddr>,
     is_running: bool,
     static_dir: Option<PathBuf>,
 }
@@ -73,12 +70,11 @@ pub struct SignalingState {
 }
 
 impl SignalingState {
-    pub fn new(local_ip: Option<IpAddr>) -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(InnerState {
                 rooms: HashMap::new(),
                 port: DEFAULT_SIGNALING_PORT,
-                local_ip,
                 is_running: false,
                 static_dir: None,
             })),
@@ -123,13 +119,9 @@ impl SignalingState {
 
     pub fn status(&self) -> SignalingStatus {
         let inner = self.inner.lock().expect("signaling state mutex poisoned");
-        let local_ip = inner.local_ip.map(|ip| ip.to_string());
-
         SignalingStatus {
             is_running: inner.is_running,
             port: inner.port,
-            local_ip: local_ip.clone(),
-            url: local_ip.map(|ip| format!("ws://{ip}:{}", inner.port)),
             active_room: inner.rooms.values().next().map(|room| room.info.clone()),
         }
     }
@@ -162,10 +154,7 @@ impl SignalingState {
                 format!("{}/ws/{room_id}", websocket_origin(&app_url)),
             ));
         }
-        let host = inner
-            .local_ip
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let host = "127.0.0.1";
 
         let app_url = format!("http://{host}:{}", inner.port);
         Ok((
@@ -324,10 +313,9 @@ pub async fn run_server(state: SignalingState) -> Result<(), String> {
     let port = state.status().port;
     let app = Router::new()
         .route("/ws/:room_id", get(websocket_handler))
-        .route("/rooms", get(create_room_handler))
         .fallback(get(static_handler))
         .with_state(state.clone());
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|err| format!("failed to bind signaling server on {addr}: {err}"))?;
@@ -336,15 +324,6 @@ pub async fn run_server(state: SignalingState) -> Result<(), String> {
     axum::serve(listener, app)
         .await
         .map_err(|err| format!("signaling server stopped: {err}"))
-}
-
-async fn create_room_handler(
-    State(state): State<SignalingState>,
-) -> Result<Json<RoomInfo>, (StatusCode, String)> {
-    state
-        .create_room(None)
-        .map(Json)
-        .map_err(|error| (StatusCode::CONFLICT, error))
 }
 
 async fn static_handler(State(state): State<SignalingState>, uri: Uri) -> Response {
@@ -493,7 +472,7 @@ mod tests {
 
     #[test]
     fn public_https_origin_creates_secure_room_urls() {
-        let state = SignalingState::new(None);
+        let state = SignalingState::new();
         let room = state
             .create_room(Some("https://host.tailnet.ts.net".to_string()))
             .expect("valid public URL");
@@ -505,28 +484,15 @@ mod tests {
 
     #[test]
     fn public_app_url_rejects_paths() {
-        let state = SignalingState::new(None);
+        let state = SignalingState::new();
         assert!(state
             .create_room(Some("https://host.tailnet.ts.net/room".to_string()))
             .is_err());
     }
 
     #[test]
-    fn local_room_uses_the_embedded_http_server() {
-        let state = SignalingState::new(Some("192.168.1.20".parse().unwrap()));
-        let room = state
-            .create_room(None)
-            .expect("local room creation succeeds");
-
-        assert_eq!(room.app_url, "http://192.168.1.20:17777");
-        assert!(room
-            .signaling_url
-            .starts_with("ws://192.168.1.20:17777/ws/"));
-    }
-
-    #[test]
     fn only_one_room_can_be_active() {
-        let state = SignalingState::new(None);
+        let state = SignalingState::new();
         state
             .create_room(None)
             .expect("first room creation succeeds");
