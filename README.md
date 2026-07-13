@@ -1,7 +1,5 @@
 # PeerCast
 
-_Eu gosto do Discord, mas não quero pagar o Nitro para compartilhar em full HD minha tela._
-
 <div align="center">
   <img src=".github/screen_client.png" alt="Tela de participante do PeerCast" />
 </div>
