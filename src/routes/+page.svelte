@@ -14,8 +14,6 @@
   type SignalingStatus = {
     isRunning: boolean;
     port: number;
-    localIp: string | null;
-    url: string | null;
     activeRoom: RoomInfo | null;
   };
 
@@ -23,6 +21,12 @@
     roomId: string;
     appUrl: string;
     signalingUrl: string;
+  };
+
+  type TailscaleStatus = {
+    connected: boolean;
+    dnsName: string | null;
+    error: string | null;
   };
 
   type ScreenQualityPreset = {
@@ -110,6 +114,7 @@
   let guestPeers: GuestPeer[] = [];
 
   let signalingStatus: SignalingStatus | null = null;
+  let tailscaleStatus: TailscaleStatus | null = null;
   let room: RoomInfo | null = null;
   let roomParticipants: string[] = [];
   let errorMessage = "";
@@ -117,8 +122,8 @@
   let isCreatingRoom = false;
   let joinUrl = "";
   let browserHostUrl = "";
-  let shareMode: "local" | "tailscale" = "local";
   let tailscaleUrl = "";
+  let needsMagicDnsHelp = true;
   let peerRole: "host" | "guest" | null = null;
   let signalingConnectionState = "Disconnected";
   let peerConnectionState = "New";
@@ -156,9 +161,12 @@
   let videoGridClass = "video-grid--one";
 
   let copiedTarget:
-    "host" | "participant" | "tailscale-serve" | "tailscale-magicdns" | null =
+    | "host"
+    | "participant"
+    | "tailscale-serve"
+    | "tailscale-magicdns"
+    | null =
     null;
-  let infoMessageTimer: ReturnType<typeof setTimeout> | null = null;
   let participantPoll: ReturnType<typeof setInterval> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempts = 0;
@@ -173,6 +181,7 @@
   >();
 
   $: videoGridClass = getVideoGridClass(guestPeers.length + 1);
+  $: needsMagicDnsHelp = !isValidMagicDnsUrl(tailscaleUrl);
 
   onMount(async () => {
     webrtcAvailable = typeof RTCPeerConnection !== "undefined";
@@ -203,6 +212,10 @@
     if (isTauri) {
       try {
         signalingStatus = await invoke<SignalingStatus>("signaling_status");
+        tailscaleStatus = await invoke<TailscaleStatus>("tailscale_status");
+        if (tailscaleStatus.dnsName && !tailscaleUrl) {
+          tailscaleUrl = `https://${tailscaleStatus.dnsName}`;
+        }
         restoreActiveRoom(signalingStatus.activeRoom);
       } catch (error) {
         infoMessage = `Signaling server error: ${String(error)}`;
@@ -216,14 +229,12 @@
     infoMessage = "";
 
     try {
-      const publicAppUrl =
-        shareMode === "tailscale" ? tailscaleUrl.trim() : null;
-      if (shareMode === "tailscale" && !publicAppUrl) {
-        errorMessage = "Enter the HTTPS MagicDNS URL before creating a room.";
+      const publicAppUrl = tailscaleUrl.trim();
+      if (!publicAppUrl) {
+        errorMessage = "Enter the MagicDNS HTTPS URL after configuring Tailscale Serve.";
         return false;
       }
-
-      room = await invoke<RoomInfo>("create_room", { publicAppUrl });
+      room = await invoke<RoomInfo>("create_tailscale_room", { publicAppUrl });
       joinUrl = room.signalingUrl;
       browserHostUrl = buildBrowserRoomUrl(room.signalingUrl, room.appUrl);
       signalingStatus = await invoke<SignalingStatus>("signaling_status");
@@ -232,7 +243,8 @@
         "Room created. Open the host URL in Chrome or Firefox to start streaming.";
       return true;
     } catch (error) {
-      errorMessage = `Failed to create room: ${String(error)}`;
+      const message = String(error);
+      errorMessage = `Failed to create room: ${message}`;
       signalingStatus = await invoke<SignalingStatus>("signaling_status");
       restoreActiveRoom(signalingStatus.activeRoom);
       return false;
@@ -250,9 +262,6 @@
       activeRoom.signalingUrl,
       activeRoom.appUrl,
     );
-    shareMode = activeRoom.appUrl.startsWith("https://")
-      ? "tailscale"
-      : "local";
     startParticipantPolling();
   }
 
@@ -313,7 +322,11 @@
 
   async function copyText(
     text: string,
-    target: "host" | "participant" | "tailscale-serve" | "tailscale-magicdns",
+    target:
+      | "host"
+      | "participant"
+      | "tailscale-serve"
+      | "tailscale-magicdns",
   ) {
     try {
       await navigator.clipboard.writeText(text);
@@ -327,15 +340,6 @@
     }
   }
 
-  function showTemporaryInfo(message: string) {
-    if (infoMessageTimer) clearTimeout(infoMessageTimer);
-    infoMessage = message;
-    infoMessageTimer = setTimeout(() => {
-      if (infoMessage === message) infoMessage = "";
-      infoMessageTimer = null;
-    }, 2000);
-  }
-
   const tailscaleServeCommand =
     "tailscale serve --bg --https=443 http://127.0.0.1:17777";
   const tailscaleMagicDnsCommand =
@@ -345,10 +349,22 @@
     command: string,
     target: "tailscale-serve" | "tailscale-magicdns",
   ) {
-    if (await copyText(command, target)) {
-      showTemporaryInfo("Command copied successfully.");
-    } else {
+    if (!(await copyText(command, target))) {
       errorMessage = "Unable to copy the command. Copy it manually.";
+    }
+  }
+
+  function isValidMagicDnsUrl(value: string) {
+    try {
+      const url = new URL(value.trim());
+      return (
+        url.protocol === "https:" &&
+        url.pathname === "/" &&
+        !url.search &&
+        !url.hash
+      );
+    } catch {
+      return false;
     }
   }
 
@@ -373,10 +389,16 @@
   }
 
   async function joinRoom() {
-    if (!joinUrl.trim()) {
+    const roomUrlFromLocation = new URLSearchParams(
+      window.location.search,
+    ).get("room");
+    const requestedRoomUrl = joinUrl.trim() || roomUrlFromLocation?.trim() || "";
+
+    if (!requestedRoomUrl) {
       errorMessage = "Open a room link before joining.";
       return;
     }
+    joinUrl = requestedRoomUrl;
 
     const params = new URLSearchParams(window.location.search);
     const role = params.get("role");
@@ -394,8 +416,8 @@
       errorMessage = "";
       infoMessage = "";
       isConnecting = true;
-      browserHostUrl = buildBrowserRoomUrl(joinUrl.trim());
-      await startHost(joinUrl.trim());
+      browserHostUrl = buildBrowserRoomUrl(requestedRoomUrl);
+      await startHost(requestedRoomUrl);
       isConnecting = false;
       return;
     }
@@ -403,13 +425,13 @@
     isConnecting = true;
     closeConnection();
     shouldReconnect = true;
-    reconnectUrl = joinUrl.trim();
+    reconnectUrl = requestedRoomUrl;
     errorMessage = "";
     infoMessage = "";
     peerRole = "guest";
 
     try {
-      await connectSignaling(joinUrl.trim());
+      await connectSignaling(requestedRoomUrl);
 
       if (webrtcAvailable) {
         await startMicrophone();
@@ -877,6 +899,19 @@
     errorMessage = "Data channel not available in multi-guest mode.";
   }
 
+  function mediaDevicesFor(feature: "camera" | "microphone" | "screen") {
+    if (navigator.mediaDevices) return navigator.mediaDevices;
+
+    const isLocalNetworkHttp =
+      window.location.protocol === "http:" &&
+      window.location.hostname !== "localhost" &&
+      window.location.hostname !== "127.0.0.1";
+    const requirement = isLocalNetworkHttp
+      ? "Browsers require HTTPS to use media devices on a local-network URL. Open a Tailscale HTTPS room link or configure HTTPS for this host."
+      : "Your browser does not provide media-device access in this context.";
+    throw new Error(`${feature} unavailable. ${requirement}`);
+  }
+
   async function startCamera() {
     errorMessage = "";
 
@@ -885,7 +920,7 @@
     }
 
     try {
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      localStream = await mediaDevicesFor("camera").getUserMedia({ video: true });
       cameraState = "Running";
       attachVideoStreams();
       addLocalTracksToAllPeers();
@@ -909,7 +944,7 @@
 
   async function startMicrophone() {
     try {
-      microphoneStream = await navigator.mediaDevices.getUserMedia({
+      microphoneStream = await mediaDevicesFor("microphone").getUserMedia({
         audio: true,
       });
       microphoneTrack = microphoneStream.getAudioTracks()[0] ?? null;
@@ -993,7 +1028,7 @@
       };
 
       screenStream =
-        await navigator.mediaDevices.getDisplayMedia(displayOptions);
+        await mediaDevicesFor("screen").getDisplayMedia(displayOptions);
 
       screenShareState = "Running";
 
@@ -1416,7 +1451,7 @@
           <div
             class="flex items-start justify-between gap-2 rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2"
           >
-            <p class="text-xs text-red-200">{errorMessage}</p>
+            <p class="min-w-0 flex-1 text-xs text-red-200">{errorMessage}</p>
             <button
               class="-mr-1 -mt-1 rounded p-1 text-red-200/70 transition hover:bg-red-400/10 hover:text-red-100"
               type="button"
@@ -1450,65 +1485,12 @@
         <!-- ========== TAURI SERVER VIEW ========== -->
         {#if !room}
           <div>
-            <p
-              class="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500"
-            >
-              Share mode
-            </p>
-            <div class="mb-3 grid grid-cols-2 gap-2">
-              <button
-                class="rounded-lg border px-3 py-2 text-left text-xs transition {shareMode ===
-                'local'
-                  ? 'border-amber-400 bg-amber-500/10 text-amber-200'
-                  : 'border-slate-700 bg-slate-800 text-slate-400 hover:border-slate-600'}"
-                type="button"
-                aria-pressed={shareMode === "local"}
-                onclick={() => (shareMode = "local")}
-              >
-                <span class="block font-semibold">Local network</span>
-                <span class="mt-0.5 block text-[10px] opacity-75"
-                  >Same Wi-Fi or LAN</span
-                >
-              </button>
-              <button
-                class="rounded-lg border px-3 py-2 text-left text-xs transition {shareMode ===
-                'tailscale'
-                  ? 'border-amber-400 bg-amber-500/10 text-amber-200'
-                  : 'border-slate-700 bg-slate-800 text-slate-400 hover:border-slate-600'}"
-                type="button"
-                aria-pressed={shareMode === "tailscale"}
-                onclick={() => (shareMode = "tailscale")}
-              >
-                <span class="block font-semibold">Tailscale</span>
-                <span class="mt-0.5 block text-[10px] opacity-75"
-                  >Private remote sharing</span
-                >
-              </button>
-            </div>
-
-            {#if shareMode === "local"}
-              <div
-                class="mb-3 rounded-lg border border-slate-800 bg-slate-800/40 p-2.5 text-[10px] leading-relaxed text-slate-400"
-              >
-                <p class="font-semibold text-slate-300">
-                  Before creating a local room
-                </p>
-                <ol class="mt-1.5 list-decimal space-y-1 pl-4">
-                  <li>Connect every participant to the same network.</li>
-                  <li>
-                    Allow inbound connections on port 17777 in the host
-                    firewall.
-                  </li>
-                  <li>Share the generated participant link.</li>
-                </ol>
-                <p class="mt-2 text-amber-200/80">
-                  Browsers can block camera or screen capture on an HTTP IP
-                  address. Use Tailscale for a secure HTTPS origin.
-                </p>
-              </div>
-            {:else}
+            <div class="mb-3 rounded-lg border border-amber-400/30 bg-amber-500/10 p-2.5">
+              <p class="mb-3 text-[11px] font-semibold uppercase tracking-[0.15em] text-amber-200">
+                Tailscale
+              </p>
               <label
-                class="mb-2 block text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-500"
+                class="mb-2 block text-[11px] font-semibold uppercase tracking-[0.15em] text-amber-200/80"
                 for="tailscale-url">MagicDNS HTTPS URL</label
               >
               <input
@@ -1519,82 +1501,57 @@
                 type="url"
               />
               <div
-                class="mb-3 rounded-lg border border-slate-800 bg-slate-800/40 p-2.5 text-[10px] leading-relaxed text-slate-400"
+                class="rounded-lg border border-amber-400/20 bg-slate-950/30 p-2.5 text-[10px] leading-relaxed text-slate-300"
               >
-                <p class="font-semibold text-slate-300">
-                  Before creating a Tailscale room
-                </p>
-                <ol class="mt-1.5 list-decimal space-y-1 pl-4">
-                  <li>Install and sign in to Tailscale on this computer.</li>
+                {#if tailscaleStatus?.connected}
+                  <p class="font-semibold text-emerald-300">Tailscale connected</p>
+                  <p class="mt-1">MagicDNS was detected and filled in above.</p>
+                {:else}
+                  <p class="font-semibold text-amber-200">Tailscale status could not be confirmed</p>
+                  <p class="mt-1">Enter the HTTPS MagicDNS URL manually after connecting Tailscale.</p>
+                {/if}
+                <p class="font-semibold text-slate-300">Configure Tailscale first</p>
+                <ol class="mt-1.5 list-decimal space-y-2 pl-4">
+                  <li>Connect this computer to your tailnet.</li>
                   <li>
-                    <span class="block">Expose PeerCast with:</span>
-                    <div
-                      class="mt-1 flex items-center gap-1 rounded bg-slate-950/60 px-1.5 py-1"
-                    >
-                      <code class="min-w-0 flex-1 break-all text-cyan-300"
-                        >{tailscaleServeCommand}</code
-                      >
+                    <span class="block">Run this command in your terminal:</span>
+                    <div class="mt-1 flex items-center gap-1 rounded bg-slate-950/60 px-1.5 py-1">
+                      <code class="min-w-0 flex-1 break-all text-cyan-300">{tailscaleServeCommand}</code>
                       <button
                         class="shrink-0 rounded p-1 text-cyan-300 transition hover:bg-cyan-400/10 hover:text-cyan-200"
                         type="button"
-                        onclick={() =>
-                          copyTailscaleCommand(
-                            tailscaleServeCommand,
-                            "tailscale-serve",
-                          )}
-                        aria-label="Copy Tailscale serve command"
+                        onclick={() => copyTailscaleCommand(tailscaleServeCommand, "tailscale-serve")}
+                        aria-label="Copy Tailscale Serve command"
                         title="Copy command"
                       >
-                        <iconify-icon
-                          icon={copiedTarget === "tailscale-serve"
-                            ? "mdi:check"
-                            : "mdi:content-copy"}
-                        ></iconify-icon>
+                        <iconify-icon icon={copiedTarget === "tailscale-serve" ? "mdi:check" : "mdi:content-copy"}></iconify-icon>
                       </button>
                     </div>
                   </li>
-                  <li>
-                    <span class="block"
-                      >Get this computer's MagicDNS hostname:</span
-                    >
-                    <div
-                      class="mt-1 flex items-center gap-1 rounded bg-slate-950/60 px-1.5 py-1"
-                    >
-                      <code class="min-w-0 flex-1 break-all text-cyan-300"
-                        >{tailscaleMagicDnsCommand}</code
-                      >
-                      <button
-                        class="shrink-0 rounded p-1 text-cyan-300 transition hover:bg-cyan-400/10 hover:text-cyan-200"
-                        type="button"
-                        onclick={() =>
-                          copyTailscaleCommand(
-                            tailscaleMagicDnsCommand,
-                            "tailscale-magicdns",
-                          )}
-                        aria-label="Copy MagicDNS command"
-                        title="Copy command"
-                      >
-                        <iconify-icon
-                          icon={copiedTarget === "tailscale-magicdns"
-                            ? "mdi:check"
-                            : "mdi:content-copy"}
-                        ></iconify-icon>
-                      </button>
-                    </div>
-                  </li>
-                  <li>
-                    Enter the result as <code class="text-cyan-300"
-                      >https://HOSTNAME</code
-                    >
-                    above.
-                  </li>
+                  {#if needsMagicDnsHelp}
+                    <li>
+                      <span class="block">Get the MagicDNS hostname:</span>
+                      <div class="mt-1 flex items-center gap-1 rounded bg-slate-950/60 px-1.5 py-1">
+                        <code class="min-w-0 flex-1 break-all text-cyan-300">{tailscaleMagicDnsCommand}</code>
+                        <button
+                          class="shrink-0 rounded p-1 text-cyan-300 transition hover:bg-cyan-400/10 hover:text-cyan-200"
+                          type="button"
+                          onclick={() => copyTailscaleCommand(tailscaleMagicDnsCommand, "tailscale-magicdns")}
+                          aria-label="Copy MagicDNS command"
+                          title="Copy command"
+                        >
+                          <iconify-icon icon={copiedTarget === "tailscale-magicdns" ? "mdi:check" : "mdi:content-copy"}></iconify-icon>
+                        </button>
+                      </div>
+                    </li>
+                    <li>Enter <code class="text-cyan-300">https://HOSTNAME</code> above, then create the room.</li>
+                  {/if}
                 </ol>
               </div>
-            {/if}
+            </div>
 
             <p class="mb-3 text-[10px] leading-relaxed text-slate-500">
-              Tailscale stays external to PeerCast. No Docker, auth key, or app
-              credentials are required.
+              PeerCast never runs Tailscale commands or enables Funnel. Tailscale Serve remains private to your tailnet.
             </p>
             <button
               class="flex w-full items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-2.5 text-sm font-semibold text-slate-950 shadow-lg shadow-amber-500/25 transition hover:bg-amber-400 disabled:opacity-60"
@@ -1634,7 +1591,7 @@
               <div class="flex items-center justify-between">
                 <span class="text-[11px] text-slate-500">Mode</span>
                 <span class="text-[11px] font-mono text-slate-300">
-                  {shareMode === "tailscale" ? "Tailscale" : "Local network"}
+                  Tailscale
                 </span>
               </div>
               <div class="flex items-center justify-between">
@@ -1683,20 +1640,12 @@
                 {/if}
               </span>
             </div>
-            {#if signalingStatus?.localIp}
-              <div class="flex items-center justify-between">
-                <span class="text-[11px] text-slate-500">Port</span>
-                <span class="text-[11px] font-mono text-slate-300"
-                  >{signalingStatus.port}</span
-                >
-              </div>
-              <div class="flex items-center justify-between">
-                <span class="text-[11px] text-slate-500">Address</span>
-                <span class="text-[11px] font-mono text-slate-300"
-                  >{signalingStatus.localIp}</span
-                >
-              </div>
-            {/if}
+            <div class="flex items-center justify-between">
+              <span class="text-[11px] text-slate-500">Port</span>
+              <span class="text-[11px] font-mono text-slate-300"
+                >{signalingStatus?.port}</span
+              >
+            </div>
           </div>
         </div>
         {@render notifications()}
